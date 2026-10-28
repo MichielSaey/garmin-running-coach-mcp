@@ -865,6 +865,14 @@ def test_call_optional_retries_reads_and_not_a_landed_write() -> None:
     assert client.get_user_profile.call_count == 1
 
 
+def test_rate_limit_is_not_retried() -> None:
+    client = MagicMock()
+    client.get_user_profile.side_effect = ConnectionResetError("429 too many requests")
+    failed = server._call_optional(client, "get_user_profile")
+    assert "429" in failed["error"]
+    assert client.get_user_profile.call_count == 1
+
+
 def test_retryable_login_failure_does_not_stick() -> None:
     from errors import CONNECTION_ERROR, structured_error
 
@@ -1021,15 +1029,19 @@ def test_october_28_overview_shape() -> None:
     assert training["actuals_as_of"] == "2026-10-28T07:40:00+01:00"
     assert training["last_4_week_avg_run_km"] == 31.8
     assert training["longest_run_last_28_days_km"] == 42.92
-    assert training["days_since_race"] is None
+    assert training["days_since_race"] == 10
     assert training["days_since_hard_session"] is None
     assert training["other_sport_min"] == 60
     assert training["adherence"] == {
         "weeks_on_target": 0,
         "weeks_missed": 1,
         "weeks_over": 0,
-        "weeks_unknown": 0,
+        "weeks_unknown": 1,
+        "evaluated_weeks": 1,
     }
+    assert "no_attempt_windows" in payload["constraints"]
+    assert "blocked_windows" not in payload["constraints"]
+    assert not any("blocked window" in item for item in payload["warnings"])
     assert payload["calendar"]["scheduled_workouts"] == [
         {"date": "2026-10-28", "name": "Wed Easy Z1 (foot test)", "workout_id": 1743836620},
         {"date": "2026-10-30", "name": "Fri Easy Z1", "workout_id": 1743836502},

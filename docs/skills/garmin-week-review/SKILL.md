@@ -91,7 +91,7 @@ this skill. There is no fixture to invent.
 - One `get_coaching_overview` per turn — season, calendar, and recent load are in the response.
 - `scaling.overridden` is true only for a `week_overrides` entry. A plan note does not set it.
 - `hard_pct` 0 keeps proposal load numbers and omits `focus`. Schedule `sessions`, not that proposal.
-- `days_since_race` and `days_since_hard_session` stay null until activity rows include a start date. Do not fill them from memory.
+- `days_since_race` comes from `last_race` on the season. `days_since_hard_session` stays null until activity rows include a start date. Do not fill either from memory.
 - Cold start: `schedule_week` adopts the one unrecorded workout already on that date. It does not upload a second copy.
 
 ## Verification

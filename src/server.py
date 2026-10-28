@@ -158,6 +158,17 @@ def _is_auth_failure(exc: BaseException) -> bool:
     return "unauthor" in text or "authentication" in text or " 401" in text
 
 
+def _is_rate_limit(exc: BaseException) -> bool:
+    """A 429 is not retried. Another attempt makes the ban more likely."""
+    text = str(exc).lower()
+    code = getattr(exc, "status_code", None) or getattr(exc, "code", None)
+    return code == 429 or "429" in text or "rate limit" in text or "too many requests" in text
+
+
+def _do_not_retry(exc: BaseException) -> bool:
+    return _is_auth_failure(exc) or _is_rate_limit(exc)
+
+
 def _snapshot_workout_ids(client: Garmin) -> Optional[set[int]]:
     if not hasattr(client, "get_workouts"):
         return None
@@ -256,7 +267,7 @@ def _call_optional(client: Garmin, method: str, *args, **kwargs) -> Any:
     except GarminConnectAuthenticationError as exc:
         return {"error": f"{method} failed: {exc}"}
     except _RETRYABLE_EXC as exc:
-        if _is_auth_failure(exc):
+        if _do_not_retry(exc):
             return {"error": f"{method} failed: {exc}"}
         if method in _WRITE_METHODS:
             landed = landed_write()
@@ -269,7 +280,7 @@ def _call_optional(client: Garmin, method: str, *args, **kwargs) -> Any:
         except GarminConnectAuthenticationError as exc2:
             return {"error": f"{method} failed: {exc2}"}
         except _RETRYABLE_EXC as exc2:
-            if _is_auth_failure(exc2):
+            if _do_not_retry(exc2):
                 return {"error": f"{method} failed: {exc2}"}
             if method in _WRITE_METHODS:
                 landed = landed_write()

@@ -381,11 +381,23 @@ def scaling_block(band: dict[str, Any], sessions: list[dict[str, Any]]) -> dict[
     }
 
 
+def attempt_windows(season: dict[str, Any]) -> list[dict[str, Any]]:
+    """Windows where a goal date must not fall. Not a ban on training sessions.
+
+    ``blocked_windows`` is the old name and means the same thing.
+    """
+    raw = season.get("constraints") or {}
+    windows = raw.get("no_attempt_windows")
+    if windows is None:
+        windows = raw.get("blocked_windows") or []
+    return list(windows)
+
+
 def constraints_block(season: dict[str, Any]) -> dict[str, Any]:
     raw = season.get("constraints") or {}
     return {
         "unavailable_weekdays": list(raw.get("unavailable_weekdays") or []),
-        "blocked_windows": list(raw.get("blocked_windows") or []),
+        "no_attempt_windows": attempt_windows(season),
         "long_run_days": list(raw.get("long_run_days") or []),
         "preferred_training_time": raw.get("preferred_training_time"),
         "timezone": season.get("timezone"),
@@ -468,7 +480,13 @@ def adherence_counts(
     snapshot: dict[str, Any] | None,
     today: date,
 ) -> dict[str, int]:
-    counts = {"weeks_on_target": 0, "weeks_missed": 0, "weeks_over": 0, "weeks_unknown": 0}
+    counts = {
+        "weeks_on_target": 0,
+        "weeks_missed": 0,
+        "weeks_over": 0,
+        "weeks_unknown": 0,
+        "evaluated_weeks": 0,
+    }
     covered = set((snapshot or {}).get("covered_weeks") or [])
     km_by_week = (snapshot or {}).get("run_km_by_week") or {}
     seen: set[str] = set()
@@ -477,7 +495,8 @@ def adherence_counts(
         monday = week_monday(start)
         while monday <= end:
             sunday = monday + timedelta(days=6)
-            if sunday < today and monday.isoformat() not in seen:
+            open_week = monday <= today <= sunday
+            if (sunday < today or open_week) and monday.isoformat() not in seen:
                 seen.add(monday.isoformat())
                 if monday < start and sunday < start:
                     monday += timedelta(days=7)
@@ -485,7 +504,7 @@ def adherence_counts(
                 band = band_for_week(season, monday)
                 target = band.get("this_week_target_km")
                 key = monday.isoformat()
-                if key not in covered or target is None:
+                if open_week or key not in covered or target is None:
                     counts["weeks_unknown"] += 1
                 else:
                     actual = float(km_by_week.get(key, 0))
@@ -496,8 +515,40 @@ def adherence_counts(
                         counts["weeks_over"] += 1
                     else:
                         counts["weeks_on_target"] += 1
+                    counts["evaluated_weeks"] += 1
             monday += timedelta(days=7)
     return counts
+
+
+def days_since_race(season: dict[str, Any] | None, today: date) -> int | None:
+    """Days since ``last_race.date`` on the season. Not read from Garmin activities."""
+    last = (season or {}).get("last_race") or {}
+    raw = last.get("date")
+    if not raw:
+        return None
+    raced = _parse_date(str(raw))
+    if raced > today:
+        return None
+    return (today - raced).days
+
+
+def attempt_window_warnings(season: dict[str, Any]) -> list[str]:
+    """Warn when a goal date sits in a no-attempt window. Sessions do not."""
+    warnings = []
+    for goal in _goals(season):
+        goal_date = str(goal.get("date") or "")
+        if not goal_date:
+            continue
+        for window in attempt_windows(season):
+            start = str(window.get("from") or "")
+            end = str(window.get("to") or "")
+            if start and end and start <= goal_date <= end:
+                reason = window.get("reason") or "no attempts"
+                title = goal.get("title") or goal.get("goal_id")
+                warnings.append(
+                    f"{title} on {goal_date} falls in a no-attempt window ({reason})."
+                )
+    return warnings
 
 
 def longest_run_warning(goal: dict[str, Any] | None, longest_km: float | None) -> str | None:
@@ -569,7 +620,6 @@ def schedule_warnings(
     allowed: list[dict[str, Any]] = []
     constraints = season.get("constraints") or {}
     unavailable = {day.upper() for day in constraints.get("unavailable_weekdays") or []}
-    blocked = constraints.get("blocked_windows") or []
     policy = session_policy(season, today)
     later_names = later_session_names(policy)
     phase = current_phase(season, today)
@@ -586,12 +636,6 @@ def schedule_warnings(
             )
             continue
         allowed.append(session)
-        for window in blocked:
-            if window.get("from") <= session["date"] <= window.get("to"):
-                warnings.append(
-                    f"{session['name']} on {session['date']} is inside a blocked window."
-                )
-                break
         identifiers = {
             session.get("library"),
             session.get("name"),
@@ -693,7 +737,7 @@ def example_season() -> dict[str, Any]:
             },
         ],
         "constraints": {
-            "blocked_windows": [
+            "no_attempt_windows": [
                 {
                     "from": "2026-10-15",
                     "to": "2027-02-15",
@@ -704,6 +748,7 @@ def example_season() -> dict[str, Any]:
             "unavailable_weekdays": [],
             "long_run_days": ["SATURDAY", "SUNDAY"],
         },
+        "last_race": {"title": "Antwerp Marathon", "date": "2026-10-18"},
         "phases": [
             {
                 "name": "return_to_run",
@@ -877,4 +922,5 @@ def status_warnings(
         warnings.append(volume)
     if phase is None and _phases(season):
         warnings.append("no_current_phase")
+    warnings.extend(attempt_window_warnings(season))
     return warnings

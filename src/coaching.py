@@ -9,6 +9,7 @@ from calendar_events import events_between, scheduled_workouts_between
 from plan_store import load_actuals, load_season, recent_notes, save_actuals
 from season_plan import (
     adherence_counts,
+    days_since_race,
     band_for_week,
     constraints_block,
     example_season,
@@ -135,7 +136,6 @@ def refresh_actuals(
     summary["events"] = events_between(client, call_optional, today, horizon)
     summary["as_of"] = zoned_now(tz_name, now).isoformat(timespec="seconds")
     # get_activities rows do not carry a start date, so these stay null.
-    summary["days_since_race"] = None
     summary["days_since_hard_session"] = None
     if season and season.get("season_id"):
         save_actuals(str(season["season_id"]), summary)
@@ -151,13 +151,19 @@ def _recent_training(
         adherence = (
             adherence_counts(season, None, today)
             if season
-            else {"weeks_on_target": 0, "weeks_missed": 0, "weeks_over": 0, "weeks_unknown": 0}
+            else {
+                "weeks_on_target": 0,
+                "weeks_missed": 0,
+                "weeks_over": 0,
+                "weeks_unknown": 0,
+                "evaluated_weeks": 0,
+            }
         )
         return {
             "actuals_as_of": None,
             "last_4_week_avg_run_km": None,
             "longest_run_last_28_days_km": None,
-            "days_since_race": None,
+            "days_since_race": days_since_race(season, today),
             "days_since_hard_session": None,
             "other_sport_min": None,
             "other_activities": [],
@@ -167,7 +173,7 @@ def _recent_training(
         "actuals_as_of": snapshot.get("as_of"),
         "last_4_week_avg_run_km": snapshot.get("last_4_week_avg_run_km"),
         "longest_run_last_28_days_km": snapshot.get("longest_run_last_28_days_km"),
-        "days_since_race": None,
+        "days_since_race": days_since_race(season, today),
         "days_since_hard_session": None,
         "other_sport_min": snapshot.get("other_sport_min"),
         "other_activities": snapshot.get("other_activities") or [],
@@ -176,6 +182,7 @@ def _recent_training(
             "weeks_missed": 0,
             "weeks_over": 0,
             "weeks_unknown": 0,
+            "evaluated_weeks": 0,
         },
     }
 
