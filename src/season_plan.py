@@ -520,6 +520,35 @@ def adherence_counts(
     return counts
 
 
+def promote_last_race(season: dict[str, Any], today: date) -> bool:
+    """When an A or B goal date has passed, it becomes ``last_race`` if it is newer.
+
+    A stored race that is already newer is left alone. Other priorities are not
+    promoted. Returns whether the document changed.
+    """
+    best = season.get("last_race") if isinstance(season.get("last_race"), dict) else None
+    best_date = str((best or {}).get("date") or "")
+    for goal in _goals(season):
+        priority = str(goal.get("priority") or "")
+        if priority not in {"A", "B"}:
+            continue
+        raw = str(goal.get("date") or "")
+        if not raw or _parse_date(raw) >= today:
+            continue
+        if raw > best_date:
+            best = {
+                "title": goal.get("title") or goal.get("goal_id"),
+                "date": raw,
+                "goal_id": goal.get("goal_id"),
+            }
+            best_date = raw
+    current = season.get("last_race") if isinstance(season.get("last_race"), dict) else {}
+    if not best or best.get("date") == current.get("date") and best.get("title") == current.get("title"):
+        return False
+    season["last_race"] = best
+    return True
+
+
 def days_since_race(season: dict[str, Any] | None, today: date) -> int | None:
     """Days since ``last_race.date`` on the season. Not read from Garmin activities."""
     last = (season or {}).get("last_race") or {}

@@ -6,10 +6,11 @@ from datetime import date, datetime, timedelta
 from typing import Any, Callable, Optional
 
 from calendar_events import events_between, scheduled_workouts_between
-from plan_store import load_actuals, load_season, recent_notes, save_actuals
+from plan_store import load_actuals, load_season, recent_notes, save_actuals, save_season
 from season_plan import (
     adherence_counts,
     days_since_race,
+    promote_last_race,
     band_for_week,
     constraints_block,
     example_season,
@@ -202,6 +203,8 @@ def build_plan_status(
     if notes is None and season.get("season_id"):
         notes = recent_notes(str(season["season_id"]))
     notes = notes or []
+    if promote_last_race(season, today) and season.get("season_id"):
+        save_season(season)
     phase_day = today
     raw_sessions = resolve_sessions(season, phase_day)
     sessions = export_sessions(raw_sessions)
@@ -268,11 +271,15 @@ def build_coaching_overview(
     refresh_failed = False
     if season and season.get("season_id") and snapshot is None:
         snapshot = load_actuals(str(season["season_id"]))
-    if not actuals_are_fresh(snapshot, moment):
+    if client is not None and not actuals_are_fresh(snapshot, moment):
+        previous = snapshot
         try:
             snapshot = refresh_actuals(client, call_optional, season, moment)
         except Exception:
+            snapshot = previous
             refresh_failed = True
+    elif client is None and not actuals_are_fresh(snapshot, moment):
+        refresh_failed = True
     if season is None:
         training = _recent_training(None, snapshot, today)
         week_end = today + timedelta(days=7)
@@ -317,6 +324,9 @@ def build_coaching_overview(
         warnings.append(mismatch)
     if refresh_failed:
         warnings = [item for item in warnings if "15%" not in item]
+        warnings.append(
+            "Garmin actuals were not refreshed. Showing the last snapshot."
+        )
     active = goal_by_id(season, season.get("active_goal_id"))
     goal_date = (active or {}).get("date")
     seen_events = [

@@ -1933,14 +1933,16 @@ def refresh_plan_actuals(season_id: Optional[str] = None) -> Dict[str, Any]:
 
 @mcp.tool()
 def get_coaching_overview() -> Dict[str, Any]:
-    """First call of a coaching turn. Season facts, then recent load."""
+    """First call of a coaching turn. Season facts, then recent load.
+
+    A Garmin 429 or other refresh failure keeps the last snapshot. The call
+    still returns the season, the sessions, and that snapshot.
+    """
     client, error = _get_client_or_error()
-    if error:
-        return error
     document = load_season()
     brief = get_coaching_brief()
     return build_coaching_overview(
-        client,
+        None if error else client,
         _call_optional,
         season=document,
         brief=brief if isinstance(brief, dict) else {"error": "coaching brief unavailable"},

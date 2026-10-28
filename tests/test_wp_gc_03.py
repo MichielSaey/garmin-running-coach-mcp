@@ -18,7 +18,9 @@ from scheduling import sync_block as run_sync_block
 from season_plan import (
     band_for_week,
     example_season,
+    promote_last_race,
     resolve_sessions,
+    status_warnings,
     volume_warning,
     what_you_can_do,
 )
@@ -863,6 +865,80 @@ def test_call_optional_retries_reads_and_not_a_landed_write() -> None:
     failed = server._call_optional(client, "get_user_profile")
     assert "failed" in failed["error"]
     assert client.get_user_profile.call_count == 1
+
+
+def test_goal_inside_no_attempt_window_warns_on_status() -> None:
+    season = example_season()
+    season["goals"].append(
+        {
+            "goal_id": "november_fkt",
+            "title": "November FKT",
+            "date": "2026-11-20",
+            "priority": "A",
+        }
+    )
+    warnings = status_warnings(
+        season,
+        date(2026, 10, 28),
+        None,
+        refresh_failed=False,
+        sessions=[
+            {
+                "date": "2026-10-28",
+                "name": "Wed Easy Z1 (foot test)",
+                "intent": "easy",
+                "type": "easy",
+                "minutes": 30,
+            }
+        ],
+    )
+    assert any("November FKT" in item and "no-attempt" in item for item in warnings)
+    assert not any("Wed Easy" in item for item in warnings)
+
+
+def test_passed_ab_goal_replaces_older_last_race() -> None:
+    season = example_season()
+    season["goals"][0]["date"] = "2026-10-20"
+    assert promote_last_race(season, date(2026, 10, 28)) is True
+    assert season["last_race"]["date"] == "2026-10-20"
+    assert season["last_race"]["goal_id"] == "pacte_siberien"
+    season["goals"][0]["priority"] = "C"
+    season["goals"][0]["date"] = "2026-10-27"
+    season["last_race"] = {"title": "Antwerp Marathon", "date": "2026-10-18"}
+    assert promote_last_race(season, date(2026, 10, 28)) is False
+    assert season["last_race"]["date"] == "2026-10-18"
+
+
+def test_refresh_rate_limit_keeps_the_overview(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    server.set_season(season)
+    snapshot = {
+        "as_of": "2026-10-01T08:00:00+02:00",
+        "last_4_week_avg_run_km": 29.8,
+        "longest_run_last_28_days_km": 42.92,
+        "runs_present": True,
+        "other_sport_min": 41.4,
+        "other_activities": [],
+        "events": [],
+    }
+
+    def limited(*_args, **_kwargs):
+        raise RuntimeError("429 too many requests")
+
+    payload = build_coaching_overview(
+        object(),
+        limited,
+        season=season,
+        brief={"coaching_brief": {"next_week_proposal": {"target_min": 10, "focus": "no"}}},
+        now=datetime(2026, 10, 28, 12, tzinfo=ZoneInfo("Europe/Brussels")),
+        snapshot=snapshot,
+    )
+    assert payload["sessions"]
+    assert payload["recent_training"]["actuals_as_of"] == "2026-10-01T08:00:00+02:00"
+    assert payload["recent_training"]["days_since_race"] == 10
+    assert any("not refreshed" in item for item in payload["warnings"])
+    assert not any("15%" in item for item in payload["warnings"])
 
 
 def test_rate_limit_is_not_retried() -> None:
