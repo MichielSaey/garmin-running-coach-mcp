@@ -183,22 +183,30 @@ def _clone_event_payload(
 ) -> dict[str, Any]:
     skip = {"id", "eventId", "calendarItemId", "itemType", "ownerId", "userId"}
     payload = {key: value for key, value in template.items() if key not in skip}
+    # Calendar list items expose `title`. The create API requires `eventName`.
     payload["title"] = title
+    payload["eventName"] = title
+    payload["name"] = title
     payload["date"] = event_date
     if "calendarDate" in payload:
         payload["calendarDate"] = event_date
     if distance_meters is not None:
-        target = dict(template.get("completionTarget") or {})
-        target["value"] = distance_meters
-        target.setdefault("unit", "meter")
-        target["unitType"] = "distance"
-        payload["completionTarget"] = target
+        payload["completionTarget"] = {
+            "value": distance_meters,
+            "unit": "meter",
+            "unitType": "distance",
+        }
     elif duration_minutes is not None:
-        target = dict(template.get("completionTarget") or {})
-        target["value"] = duration_minutes
-        target.setdefault("unit", "minute")
-        target["unitType"] = "duration"
-        payload["completionTarget"] = target
+        minutes = float(duration_minutes)
+        if minutes % 60 == 0:
+            value, unit = minutes / 60.0, "hour"
+        else:
+            value, unit = minutes * 60.0, "second"
+        payload["completionTarget"] = {
+            "value": value,
+            "unit": unit,
+            "unitType": "duration",
+        }
     return payload
 
 

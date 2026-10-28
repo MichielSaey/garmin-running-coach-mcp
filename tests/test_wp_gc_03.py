@@ -1179,6 +1179,23 @@ def test_add_event_returns_existing_and_errors_when_the_write_does_not_stick() -
     created = add_event(client, call, title="Pacte Sibérien", event_date="2027-04-24")
     assert "did not stick" in created["error"]
     client.client.post.assert_called_once()
+    sent = client.client.post.call_args.kwargs["json"]
+    assert sent["eventName"] == "Pacte Sibérien"
+    assert sent["title"] == "Pacte Sibérien"
+    timed = add_event(
+        client,
+        call,
+        title="Pacte Sibérien",
+        event_date="2027-04-25",
+        duration_minutes=720,
+    )
+    assert "did not stick" in timed["error"]
+    timed_body = client.client.post.call_args.kwargs["json"]
+    assert timed_body["completionTarget"] == {
+        "value": 12.0,
+        "unit": "hour",
+        "unitType": "duration",
+    }
 
 
 def test_accent_folded_garmin_title_still_flags_the_date_mismatch() -> None:

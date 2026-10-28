@@ -870,7 +870,7 @@ def what_you_can_do(
         actions.append(
             {
                 "when": f"Move the Garmin race date onto {goal_date}",
-                "tool": "remove_event then add_event, then get_events",
+                "tool": "add_event, then remove_event, then get_events",
             }
         )
     elif goal_date and not race_on_calendar:
