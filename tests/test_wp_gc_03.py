@@ -12,13 +12,15 @@ from garminconnect import GarminConnectAuthenticationError
 
 import server
 from coaching import build_coaching_overview, summarize_activities
-from plan_store import save_schedule_record
+from plan_store import get_schedule_record, save_actuals, save_schedule_record
 from scheduling import schedule_week as run_schedule_week
 from scheduling import sync_block as run_sync_block
 from season_plan import (
     band_for_week,
     example_season,
+    resolve_sessions,
     volume_warning,
+    what_you_can_do,
 )
 from step_schema import estimate_minutes, estimate_seconds, normalize_steps
 
@@ -472,6 +474,223 @@ def test_schedule_week_partial_retry_adopts_only_the_missing_dates(plan_db) -> N
     client.upload_running_workout.assert_not_called()
 
 
+def test_same_library_workout_on_a_new_date_is_still_adopted(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    save_schedule_record(
+        idempotency_key="2026-10-19|2026-10-21|old",
+        date="2026-10-21",
+        workout_id=1743836502,
+        schedule_id=1,
+    )
+    client = MagicMock()
+    client.get_scheduled_workouts.return_value = {
+        "calendarItems": [
+            {
+                "itemType": "workout",
+                "date": "2026-10-30",
+                "title": "Fri Easy Z1",
+                "workoutId": 1743836502,
+                "id": 99,
+            }
+        ]
+    }
+    result = run_schedule_week(
+        season,
+        [
+            {
+                "date": "2026-10-30",
+                "type": "easy",
+                "intent": "easy",
+                "name": "Fri Easy Z1",
+                "minutes": 30,
+                "zone": 1,
+                "steps": [
+                    {
+                        "type": "interval",
+                        "end": {"type": "time", "minutes": 30},
+                        "target": {"type": "hr_zone", "zone": 1},
+                    }
+                ],
+            }
+        ],
+        client=client,
+        call_optional=_call,
+        week_start="2026-10-26",
+        real_today=date(2026, 10, 28),
+    )
+    assert result["results"][0]["adopted"] is True
+    assert result["results"][0]["workout_id"] == 1743836502
+    client.upload_running_workout.assert_not_called()
+
+
+def test_delete_scheduled_workout_forgets_the_idempotency_row(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    server.set_season(season)
+    save_schedule_record(
+        idempotency_key="2026-10-26|2026-10-28|wed-easy-z1-foot-test",
+        date="2026-10-28",
+        workout_id=1743836620,
+        schedule_id=11,
+    )
+    client = MagicMock()
+    client.unschedule_workout.return_value = {"ok": True}
+    with patch.object(server, "_get_client_or_error", return_value=(client, None)):
+        deleted = server.delete_scheduled_workout(schedule_id=11, workout_date="2026-10-28")
+    assert deleted["ok"] is True
+    assert (
+        get_schedule_record("2026-10-26|2026-10-28|wed-easy-z1-foot-test") is None
+    )
+
+
+def test_failed_schedule_retries_without_a_second_upload(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    client = _october_client({})
+    client.schedule_workout.side_effect = [
+        {"error": "schedule failed"},
+        {"workoutScheduleId": 77},
+    ]
+    session = {
+        "date": "2026-10-28",
+        "type": "easy",
+        "intent": "easy",
+        "name": "Wed Easy",
+        "minutes": 30,
+        "zone": 1,
+        "steps": [
+            {
+                "type": "interval",
+                "end": {"type": "time", "minutes": 30},
+                "target": {"type": "hr_zone", "zone": 1},
+            }
+        ],
+    }
+    first = run_schedule_week(
+        season,
+        [session],
+        client=client,
+        call_optional=_call,
+        week_start="2026-10-26",
+        real_today=date(2026, 10, 28),
+    )
+    assert first["results"][0]["ok"] is False
+    second = run_schedule_week(
+        season,
+        [session],
+        client=client,
+        call_optional=_call,
+        week_start="2026-10-26",
+        real_today=date(2026, 10, 28),
+    )
+    assert second["results"][0]["ok"] is True
+    assert second["results"][0]["workout_id"] == 999
+    assert client.upload_running_workout.call_count == 1
+    assert client.schedule_workout.call_count == 2
+
+
+def test_week_that_overlaps_a_phase_keeps_the_band() -> None:
+    season = {
+        "season_id": "overlap",
+        "timezone": "Europe/Brussels",
+        "goals": [],
+        "phases": [
+            {
+                "name": "return_to_run",
+                "start": "2026-10-28",
+                "end": "2026-11-08",
+                "weekly_km": [10, 25],
+                "hard_pct": 0,
+            }
+        ],
+    }
+    band = band_for_week(season, date(2026, 10, 26))
+    assert band["phase"]["name"] == "return_to_run"
+    assert band["this_week_target_km"] == [10, 18]
+    assert resolve_sessions(season, date(2026, 10, 26))
+
+
+def test_combine_uploads_the_normalized_pace_step(monkeypatch) -> None:
+    captured: dict = {}
+
+    def upload(client, workout):
+        del client
+        captured["workout"] = workout
+        return {"workoutId": 1}
+
+    monkeypatch.setattr(server, "_get_client_or_error", lambda: (object(), None))
+    monkeypatch.setattr(server, "_upload_running_workout", upload)
+    monkeypatch.setattr(server, "get_profile", lambda: {})
+    monkeypatch.setattr(server, "resolve_hr_context", lambda *_args, **_kwargs: {"zones": []})
+    result = server.combine_workout_templates(
+        "pace",
+        [
+            {
+                "steps": [
+                    {
+                        "type": "interval",
+                        "end": {"type": "time", "minutes": 24},
+                        "target": {"type": "pace", "mps_low": 2.6, "mps_high": 2.78},
+                    }
+                ]
+            }
+        ],
+    )
+    assert result["resolved_steps"][0]["target"]["type"] == "pace"
+    segment = captured["workout"].workoutSegments[0]
+    step = segment.workoutSteps[0]
+    assert step.targetValueOne == 2.6
+    assert step.targetValueTwo == 2.78
+
+
+def test_stale_actuals_do_not_warn_on_schedule(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    server.set_season(season)
+    save_actuals(
+        season["season_id"],
+        {
+            "as_of": "2026-10-01T00:00:00+02:00",
+            "last_4_week_avg_run_km": 10,
+            "runs_present": True,
+        },
+    )
+    result = server.schedule_week(
+        "2026-10-26",
+        [
+            {
+                "date": "2026-10-28",
+                "type": "easy",
+                "intent": "easy",
+                "name": "Long easy",
+                "minutes": 180,
+                "zone": 2,
+                "steps": [
+                    {
+                        "type": "interval",
+                        "end": {"type": "time", "minutes": 180},
+                        "target": {"type": "hr_zone", "zone": 2},
+                    }
+                ],
+            }
+        ],
+        dry_run=True,
+    )
+    assert not any("15%" in item for item in result["warnings"])
+
+
+def test_matching_race_date_does_not_suggest_moving_it() -> None:
+    actions = what_you_can_do(
+        has_sessions=True,
+        mismatch=None,
+        goal_date="2027-04-24",
+        race_on_calendar=True,
+    )
+    assert all("wrong date" not in item["when"] for item in actions)
+    assert all("remove_event" not in item["tool"] for item in actions)
+
+
 def test_two_unrecorded_workouts_are_not_adopted_or_uploaded(plan_db) -> None:
     del plan_db
     season = example_season()
@@ -633,11 +852,11 @@ def test_call_optional_retries_reads_and_not_a_landed_write() -> None:
     assert landed["workoutId"] == 5
     assert client.schedule_workout.call_count == 1
 
-    client.schedule_workout.side_effect = [ConnectionResetError("reset"), {"workoutScheduleId": 9}]
+    client.schedule_workout.side_effect = ConnectionResetError("reset")
     client.get_scheduled_workouts.return_value = {"calendarItems": []}
-    retried = server._call_optional(client, "schedule_workout", 6, "2026-10-29")
-    assert retried == {"workoutScheduleId": 9}
-    assert client.schedule_workout.call_count == 3
+    missed = server._call_optional(client, "schedule_workout", 6, "2026-10-29")
+    assert "failed" in missed["error"]
+    assert client.schedule_workout.call_count == 2
 
     client.get_user_profile.side_effect = GarminConnectAuthenticationError("nope")
     client.get_user_profile.reset_mock()

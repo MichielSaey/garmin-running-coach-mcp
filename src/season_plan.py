@@ -150,12 +150,12 @@ def band_for_week(season: dict[str, Any], week_monday_date: date) -> dict[str, A
     """Kilometre band for the Monday that starts ``week_monday_date``'s week."""
     monday = week_monday(week_monday_date)
     phase = None
+    sunday = monday + timedelta(days=6)
     for item in _phases(season):
         start, end = phase_bounds(season, item)
-        if start <= monday <= end or start <= monday + timedelta(days=6) <= end:
-            if start <= monday <= end:
-                phase = item
-                break
+        if monday <= end and start <= sunday:
+            phase = item
+            break
     if phase is None:
         phase = current_phase(season, monday)
     override = None
@@ -643,6 +643,7 @@ def export_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "zone": session["zone"],
                 "distance_km_estimate": session["distance_km_estimate"],
                 "note": session.get("note"),
+                "library": session.get("library"),
                 "idempotency_key": session["idempotency_key"],
                 "steps": session["steps"],
             }
@@ -803,13 +804,6 @@ def what_you_can_do(
             {
                 "when": "The agreed race date is not on the calendar",
                 "tool": "add_event, then get_events",
-            }
-        )
-    else:
-        actions.append(
-            {
-                "when": "A calendar event is on the wrong date",
-                "tool": "remove_event, then add_event, then get_events",
             }
         )
     actions.append({"when": "Record why a week left the template", "tool": "add_plan_note"})

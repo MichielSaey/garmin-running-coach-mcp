@@ -16,7 +16,7 @@ from calendar_events import (
 from plan_store import (
     delete_schedule_record,
     get_schedule_record,
-    recorded_workout_ids,
+    recorded_workout_ids_on_date,
     save_schedule_record,
 )
 from season_plan import (
@@ -66,7 +66,7 @@ def _schedule_id_from_upload(result: Any) -> Optional[int]:
     inner = result.get("schedule")
     if isinstance(inner, dict):
         return _schedule_id_from_upload(inner)
-    return None
+    return schedule_id_from_item(result)
 
 
 def _unschedule_recorded(
@@ -123,6 +123,12 @@ def _upload_session(
         return {"date": session.get("date"), "ok": False, "error": "upload did not return a workout id"}
     scheduled = call_optional(client, "schedule_workout", int(workout_id), session["date"])
     if isinstance(scheduled, dict) and scheduled.get("error"):
+        save_schedule_record(
+            idempotency_key=session["idempotency_key"],
+            date=session["date"],
+            workout_id=int(workout_id),
+            schedule_id=None,
+        )
         return {
             "date": session.get("date"),
             "ok": False,
@@ -149,6 +155,29 @@ def _schedule_one(
 ) -> dict[str, Any]:
     key = session["idempotency_key"]
     record = get_schedule_record(key)
+    if record is not None and record.get("schedule_id") is None and record.get("workout_id"):
+        scheduled = call_optional(
+            client, "schedule_workout", int(record["workout_id"]), session["date"]
+        )
+        if isinstance(scheduled, dict) and scheduled.get("error"):
+            return {
+                "date": session["date"],
+                "ok": False,
+                "workout_id": int(record["workout_id"]),
+                "error": scheduled["error"],
+            }
+        schedule_id = _schedule_id_from_upload(scheduled)
+        save_schedule_record(
+            idempotency_key=key,
+            date=session["date"],
+            workout_id=int(record["workout_id"]),
+            schedule_id=schedule_id,
+        )
+        return {
+            "date": session["date"],
+            "ok": True,
+            "workout_id": int(record["workout_id"]),
+        }
     if record is not None:
         if not replace_existing or date.fromisoformat(session["date"]) < real_today:
             return {"date": session["date"], "ok": True, "skipped": "duplicate"}
@@ -156,10 +185,12 @@ def _schedule_one(
         if error:
             return {"date": session["date"], "ok": False, "error": error}
 
-    known = recorded_workout_ids()
+    known_today = recorded_workout_ids_on_date(session["date"])
     on_date = _workouts_on_date(client, call_optional, session["date"])
     unrecorded = [
-        item for item in on_date if workout_id_from_item(item) not in known
+        item
+        for item in on_date
+        if workout_id_from_item(item) not in known_today
     ]
     if len(unrecorded) > 1:
         return {
@@ -180,6 +211,15 @@ def _schedule_one(
             schedule_id=schedule_id_from_item(item),
         )
         return {"date": session["date"], "ok": True, "adopted": True, "workout_id": workout_id}
+
+    if on_date:
+        return {
+            "date": session["date"],
+            "ok": False,
+            "warning": (
+                f"Date {session['date']} already has a workout; not uploading another."
+            ),
+        }
 
     return _upload_session(client, call_optional, session)
 

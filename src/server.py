@@ -1,6 +1,7 @@
 import os
 import re
 from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional
 
 from garminconnect import (
@@ -13,10 +14,16 @@ from mcp.server.fastmcp import FastMCP
 from calendar_events import add_event as create_calendar_event
 from calendar_events import remove_event as delete_calendar_event
 from calendar_events import schedule_id_from_item
-from coaching import build_coaching_overview, build_plan_status, refresh_actuals
+from coaching import (
+    actuals_are_fresh,
+    build_coaching_overview,
+    build_plan_status,
+    refresh_actuals,
+)
 from coaching_brief import build_coaching_brief
 from plan_store import (
     add_note,
+    forget_schedule,
     load_actuals,
     load_season,
     merge_patch,
@@ -179,15 +186,25 @@ def _new_uploaded_workout(
         return _LOOKUP_FAILED
     if not isinstance(payload, list):
         return _LOOKUP_FAILED
+    fresh = []
     for item in payload:
         if not isinstance(item, dict) or item.get("workoutId") is None:
             continue
         workout_id = int(item["workoutId"])
         if workout_id in before_ids:
             continue
-        if name is None or item.get("workoutName") == name:
-            return {"workoutId": workout_id, "workoutName": item.get("workoutName")}
-    return None
+        fresh.append(item)
+    if not fresh:
+        return None
+    if name is not None:
+        fresh = [item for item in fresh if item.get("workoutName") == name]
+    if len(fresh) != 1:
+        return _LOOKUP_FAILED
+    chosen = fresh[0]
+    return {
+        "workoutId": int(chosen["workoutId"]),
+        "workoutName": chosen.get("workoutName"),
+    }
 
 
 def _scheduled_write_landed(client: Garmin, workout_id: int, workout_date: str) -> Any:
@@ -243,10 +260,10 @@ def _call_optional(client: Garmin, method: str, *args, **kwargs) -> Any:
             return {"error": f"{method} failed: {exc}"}
         if method in _WRITE_METHODS:
             landed = landed_write()
-            if landed is _LOOKUP_FAILED:
-                return {"error": f"{method} failed: {exc}"}
-            if landed is not None:
+            if landed is not None and landed is not _LOOKUP_FAILED:
                 return landed
+            # Not visible yet is not proof the first POST failed. Do not send it again.
+            return {"error": f"{method} failed: {exc}"}
         try:
             return invoke()
         except GarminConnectAuthenticationError as exc2:
@@ -1658,20 +1675,21 @@ def combine_workout_templates(
     try:
         checked = normalize_segments(segments)
         canonical: List[Dict[str, Any]] = []
+        upload_segments: List[Dict[str, Any]] = []
         for segment in checked:
             if segment.get("steps"):
-                canonical.extend(normalize_steps(segment["steps"]))
+                normalized = normalize_steps(segment["steps"])
+                canonical.extend(normalized)
+                upload_segments.append({"steps": canonical_to_builder(normalized)})
             else:
-                canonical.extend(
-                    normalize_steps(
-                        build_template_steps(
-                            str(segment["template"]), segment.get("params") or {}
-                        )
-                    )
+                template_steps = build_template_steps(
+                    str(segment["template"]), segment.get("params") or {}
                 )
+                canonical.extend(normalize_steps(template_steps))
+                upload_segments.append(segment)
         running_workout = build_combined_workout(
             name,
-            checked,
+            upload_segments,
             description=description,
             include_nutrition_cues=include_nutrition_cues,
         )
@@ -1752,6 +1770,11 @@ def delete_scheduled_workout(
     result = _call_optional(client, "unschedule_workout", int(resolved))
     if isinstance(result, dict) and result.get("error"):
         return result
+    forget_schedule(
+        schedule_id=int(resolved),
+        workout_id=int(workout_id) if workout_id is not None else None,
+        day=workout_date,
+    )
     return {"ok": True, "schedule_id": int(resolved), "workout_id": workout_id}
 
 
@@ -1824,6 +1847,7 @@ def update_season(
     if document is None:
         return {"error": "no_season"}
     merged = merge_patch(document, patch)
+    merged["season_id"] = season_id
     try:
         validate_season(merged)
         save_season(merged)
@@ -1885,7 +1909,13 @@ def refresh_plan_actuals(season_id: Optional[str] = None) -> Dict[str, Any]:
         return error
     document = load_season(season_id)
     try:
-        return refresh_actuals(client, _call_optional, document, datetime.now())
+        tz_name = str((document or {}).get("timezone") or "Europe/Brussels")
+        return refresh_actuals(
+            client,
+            _call_optional,
+            document,
+            datetime.now(ZoneInfo(tz_name)),
+        )
     except Exception as exc:
         return {"error": str(exc)}
 
@@ -1930,6 +1960,10 @@ def schedule_week(
     if idempotency_key and len(prepared) == 1 and not prepared[0].get("idempotency_key"):
         prepared[0]["idempotency_key"] = idempotency_key
     snapshot = load_actuals(str(document["season_id"]))
+    tz_name = str(document.get("timezone") or "Europe/Brussels")
+    stale = bool(snapshot and snapshot.get("as_of")) and not actuals_are_fresh(
+        snapshot, datetime.now(ZoneInfo(tz_name))
+    )
     if dry_run:
         return run_schedule_week(
             document,
@@ -1939,9 +1973,9 @@ def schedule_week(
             week_start=week_start,
             dry_run=True,
             replace_existing=replace_existing,
-            real_today=zoned_today(str(document.get("timezone") or "Europe/Brussels")),
+            real_today=zoned_today(tz_name),
             snapshot=snapshot,
-            refresh_failed=False,
+            refresh_failed=stale,
         )
     client, error = _get_client_or_error()
     if error:
@@ -1954,9 +1988,9 @@ def schedule_week(
         week_start=week_start,
         dry_run=False,
         replace_existing=replace_existing,
-        real_today=zoned_today(str(document.get("timezone") or "Europe/Brussels")),
+        real_today=zoned_today(tz_name),
         snapshot=snapshot,
-        refresh_failed=False,
+        refresh_failed=stale,
     )
 
 
@@ -1970,14 +2004,19 @@ def sync_block(weeks_ahead: int = 4, replace_existing: bool = False) -> Dict[str
     if error:
         return error
     snapshot = load_actuals(str(document["season_id"]))
+    tz_name = str(document.get("timezone") or "Europe/Brussels")
+    stale = bool(snapshot and snapshot.get("as_of")) and not actuals_are_fresh(
+        snapshot, datetime.now(ZoneInfo(tz_name))
+    )
     return run_sync_block(
         document,
         client=client,
         call_optional=_call_optional,
-        today=zoned_today(str(document.get("timezone") or "Europe/Brussels")),
+        today=zoned_today(tz_name),
         weeks_ahead=weeks_ahead,
         replace_existing=replace_existing,
         snapshot=snapshot,
+        refresh_failed=stale,
     )
 
 

@@ -189,6 +189,16 @@ def recorded_workout_ids() -> set[int]:
     return {int(row["workout_id"]) for row in rows}
 
 
+def recorded_workout_ids_on_date(day: str) -> set[int]:
+    """Workout ids already recorded for this calendar date, not other dates."""
+    with connect() as conn:
+        rows = conn.execute(
+            "SELECT workout_id FROM schedule_records WHERE date = ?",
+            (day,),
+        ).fetchall()
+    return {int(row["workout_id"]) for row in rows}
+
+
 def save_schedule_record(
     *,
     idempotency_key: str,
@@ -211,6 +221,26 @@ def save_schedule_record(
             """,
             (idempotency_key, season_id, date, int(workout_id), schedule_id, _now()),
         )
+
+
+def forget_schedule(
+    *,
+    schedule_id: Optional[int] = None,
+    workout_id: Optional[int] = None,
+    day: Optional[str] = None,
+) -> None:
+    """Drop idempotency rows for a calendar delete so the session can be pushed again."""
+    with connect() as conn:
+        if schedule_id is not None:
+            conn.execute(
+                "DELETE FROM schedule_records WHERE schedule_id = ?",
+                (int(schedule_id),),
+            )
+        if workout_id is not None and day:
+            conn.execute(
+                "DELETE FROM schedule_records WHERE workout_id = ? AND date = ?",
+                (int(workout_id), day),
+            )
 
 
 def delete_schedule_record(idempotency_key: str) -> None:

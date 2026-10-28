@@ -312,10 +312,12 @@ def build_coaching_overview(
         warnings = [item for item in warnings if "15%" not in item]
     active = goal_by_id(season, season.get("active_goal_id"))
     goal_date = (active or {}).get("date")
-    titles = {
-        str(event.get("title") or "")
-        for event in calendar["events"]
-    }
+    seen_events = [
+        event
+        for event in list(events) + list(calendar.get("events") or [])
+        if isinstance(event, dict)
+    ]
+    titles = {str(event.get("title") or "") for event in seen_events}
     expected = (active or {}).get("garmin_event_title") or (active or {}).get("title")
     race_on_calendar = bool(expected) and any(expected in title or title in str(expected) for title in titles)
     hard_pct = (status.get("scaling") or {}).get("hard_pct")
