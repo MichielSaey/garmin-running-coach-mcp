@@ -10,7 +10,22 @@ from garminconnect import (
 )
 from mcp.server.fastmcp import FastMCP
 
+from calendar_events import add_event as create_calendar_event
+from calendar_events import remove_event as delete_calendar_event
+from calendar_events import schedule_id_from_item
+from coaching import build_coaching_overview, build_plan_status, refresh_actuals
 from coaching_brief import build_coaching_brief
+from plan_store import (
+    add_note,
+    load_actuals,
+    load_season,
+    merge_patch,
+    recent_notes,
+    save_season,
+)
+from scheduling import schedule_week as run_schedule_week
+from scheduling import sync_block as run_sync_block
+from season_plan import validate_season, zoned_today
 from errors import (
     AUTH_FAILED,
     CONNECTION_ERROR,
@@ -43,10 +58,12 @@ from zones import (
     zones_to_minute_columns,
 )
 from workout_builder import build_running_workout, extract_workout_id
+from step_schema import canonical_to_builder, normalize_segments, normalize_steps
 from workout_templates import (
     TEMPLATE_DESCRIPTIONS,
     TEMPLATE_TYPES,
     build_combined_workout,
+    build_template_steps,
     build_template_workout,
     estimate_combined_duration_minutes,
     estimate_template_duration_minutes,
@@ -122,11 +139,128 @@ WEEKLY_STATS_HEADERS = [
 ]
 
 
+_WRITE_METHODS = frozenset({"upload_running_workout", "schedule_workout"})
+_RETRYABLE_EXC = (ConnectionResetError, ConnectionError, GarminConnectConnectionError)
+_LOOKUP_FAILED = object()
+
+
+def _is_auth_failure(exc: BaseException) -> bool:
+    if isinstance(exc, GarminConnectAuthenticationError):
+        return True
+    text = str(exc).lower()
+    return "unauthor" in text or "authentication" in text or " 401" in text
+
+
+def _snapshot_workout_ids(client: Garmin) -> Optional[set[int]]:
+    if not hasattr(client, "get_workouts"):
+        return None
+    try:
+        payload = client.get_workouts(0, 100)
+    except Exception:
+        return None
+    if not isinstance(payload, list):
+        return None
+    found: set[int] = set()
+    for workout in payload:
+        if isinstance(workout, dict) and workout.get("workoutId") is not None:
+            found.add(int(workout["workoutId"]))
+    return found
+
+
+def _new_uploaded_workout(
+    client: Garmin, workout: Any, before_ids: Optional[set[int]]
+) -> Any:
+    if before_ids is None or not hasattr(client, "get_workouts"):
+        return _LOOKUP_FAILED
+    name = getattr(workout, "workoutName", None)
+    try:
+        payload = client.get_workouts(0, 100)
+    except Exception:
+        return _LOOKUP_FAILED
+    if not isinstance(payload, list):
+        return _LOOKUP_FAILED
+    for item in payload:
+        if not isinstance(item, dict) or item.get("workoutId") is None:
+            continue
+        workout_id = int(item["workoutId"])
+        if workout_id in before_ids:
+            continue
+        if name is None or item.get("workoutName") == name:
+            return {"workoutId": workout_id, "workoutName": item.get("workoutName")}
+    return None
+
+
+def _scheduled_write_landed(client: Garmin, workout_id: int, workout_date: str) -> Any:
+    if not hasattr(client, "get_scheduled_workouts"):
+        return _LOOKUP_FAILED
+    try:
+        target = date.fromisoformat(workout_date)
+    except ValueError:
+        return None
+    try:
+        payload = client.get_scheduled_workouts(year=target.year, month=target.month)
+    except Exception:
+        return _LOOKUP_FAILED
+    if not isinstance(payload, dict) or payload.get("error"):
+        return _LOOKUP_FAILED
+    items = payload.get("calendarItems", [])
+    if not isinstance(items, list):
+        return _LOOKUP_FAILED
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        if _calendar_item_date(item) != workout_date:
+            continue
+        if _calendar_item_workout_id(item) == workout_id:
+            return item
+    return None
+
+
 def _call_optional(client: Garmin, method: str, *args, **kwargs) -> Any:
     if not hasattr(client, method):
         return None
-    try:
+
+    before_ids = None
+    if method == "upload_running_workout":
+        before_ids = _snapshot_workout_ids(client)
+
+    def invoke() -> Any:
         return getattr(client, method)(*args, **kwargs)
+
+    def landed_write() -> Any:
+        if method == "schedule_workout" and len(args) >= 2:
+            return _scheduled_write_landed(client, int(args[0]), str(args[1]))
+        if method == "upload_running_workout" and args:
+            return _new_uploaded_workout(client, args[0], before_ids)
+        return None
+
+    try:
+        return invoke()
+    except GarminConnectAuthenticationError as exc:
+        return {"error": f"{method} failed: {exc}"}
+    except _RETRYABLE_EXC as exc:
+        if _is_auth_failure(exc):
+            return {"error": f"{method} failed: {exc}"}
+        if method in _WRITE_METHODS:
+            landed = landed_write()
+            if landed is _LOOKUP_FAILED:
+                return {"error": f"{method} failed: {exc}"}
+            if landed is not None:
+                return landed
+        try:
+            return invoke()
+        except GarminConnectAuthenticationError as exc2:
+            return {"error": f"{method} failed: {exc2}"}
+        except _RETRYABLE_EXC as exc2:
+            if _is_auth_failure(exc2):
+                return {"error": f"{method} failed: {exc2}"}
+            if method in _WRITE_METHODS:
+                landed = landed_write()
+                if landed is not None and landed is not _LOOKUP_FAILED:
+                    return landed
+            return {"error": f"{method} failed: {exc2}"}
+        except Exception as exc2:
+            return {"error": f"{method} failed: {exc2}"}
     except Exception as exc:
         return {"error": f"{method} failed: {exc}"}
 
@@ -183,8 +317,12 @@ def _find_scheduled_workout(
 def _init_client() -> None:
     global _CLIENT
     global _CLIENT_ERROR
-    if _CLIENT is not None or _CLIENT_ERROR is not None:
+    if _CLIENT is not None:
         return
+    # A retryable login failure must not stick for the life of the process.
+    if _CLIENT_ERROR is not None and not _CLIENT_ERROR.get("retryable"):
+        return
+    _CLIENT_ERROR = None
     if not DEFAULT_GARMIN_USERNAME or not DEFAULT_GARMIN_PASSWORD:
         _CLIENT_ERROR = structured_error(
             MISSING_CREDENTIALS,
@@ -687,6 +825,7 @@ def get_events(months_ahead: int = 12) -> Dict[str, Any]:
         "target_value",
         "target_unit",
         "target_unit_type",
+        "event_id",
     ]
     today = date.today()
     start_month = today.replace(day=1)
@@ -708,6 +847,11 @@ def get_events(months_ahead: int = 12) -> Dict[str, Any]:
             return
         seen_keys.add(dedupe_key)
         completion_target = event.get("completionTarget") or {}
+        event_id = None
+        for key in ("id", "eventId", "calendarItemId"):
+            if event.get(key) is not None:
+                event_id = int(event[key])
+                break
         row = [
             title or event.get("title"),
             event.get("itemType"),
@@ -715,6 +859,7 @@ def get_events(months_ahead: int = 12) -> Dict[str, Any]:
             completion_target.get("value"),
             completion_target.get("unit"),
             completion_target.get("unitType"),
+            event_id,
         ]
         scan_rows.append(row)
         if event_date > today:
@@ -756,8 +901,17 @@ def get_events(months_ahead: int = 12) -> Dict[str, Any]:
 
     upcoming_rows.sort(key=lambda row: row[2])
 
+    event_objects = [
+        {
+            "event_id": row[6] if len(row) > 6 else None,
+            "title": row[0],
+            "date": row[2],
+        }
+        for row in upcoming_rows
+    ]
     return {
         "latest_event": latest_event_within_days(scan_rows, today=today),
+        "events": event_objects,
         "Garmin Events": {
             "Headers": event_columns,
             "Rows": upcoming_rows,
@@ -1101,45 +1255,41 @@ def get_workouts(start: int = 0, limit: int = 20) -> Dict[str, Any]:
     }
 
 
-@mcp.tool()
-def workout(
+def _create_running_workout(
     name: str,
     steps: List[Dict[str, Any]],
     description: Optional[str] = None,
     workout_date: Optional[str] = None,
+    sport: str = "running",
 ) -> Dict[str, Any]:
-    """Create a running workout from an ordered list of adjacent steps.
-
-    Each step is a dict with:
-    - type: warmup | interval | recovery | cooldown | repeat
-    - duration_minutes: float (time end condition) OR distance_meters (distance end)
-    - workout_type: optional preset zone key (base, threshold, sprint, ...)
-    - heart_rate_zone: optional Garmin zone number 1-5 (overrides workout_type)
-    - target: optional "speed" with speed_mps_min / speed_mps_max (m/s range)
-    - iterations + steps: required for repeat blocks
-
-    Default intensity target is HR zone. Sprint-style efforts can use
-    distance_meters + target="speed" instead. Pass workout_date (YYYY-MM-DD)
-    to also schedule it in the same call.
-    """
-    client, error = _get_client_or_error()
-    if error:
-        return error
+    """Closed step schema. ``workout`` remains an alias for one release."""
+    if sport != "running":
+        return {"error": "unsupported_sport", "code": "unsupported_sport"}
+    try:
+        canonical = normalize_steps(steps)
+        running_workout = build_running_workout(
+            name, canonical_to_builder(canonical), description=description
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
 
     if workout_date is not None:
         date_error = _validate_workout_date(workout_date)
         if date_error:
             return date_error
 
-    try:
-        running_workout = build_running_workout(name, steps, description=description)
-    except ValueError as exc:
-        return {"error": str(exc)}
+    client, error = _get_client_or_error()
+    if error:
+        return error
 
     upload_result = _upload_running_workout(client, running_workout)
     if upload_result.get("error"):
         return upload_result
 
+    upload_result["resolved_steps"] = canonical
+    upload_result["estimatedDurationMinutes"] = round(
+        running_workout.estimatedDurationInSecs / 60, 1
+    )
     upload_result["heartRateZones"] = resolve_hr_context(client, get_profile()).get("zones")
 
     workout_id = upload_result.get("workoutId")
@@ -1147,8 +1297,50 @@ def workout(
         upload_result["schedule"] = _schedule_existing(
             client, int(workout_id), workout_date
         )
-
     return upload_result
+
+
+@mcp.tool()
+def create_workout(
+    name: str,
+    steps: List[Dict[str, Any]],
+    description: Optional[str] = None,
+    workout_date: Optional[str] = None,
+    sport: str = "running",
+) -> Dict[str, Any]:
+    """Create a running workout from a closed step list and echo the resolved steps.
+
+    End is time (minutes) or distance (meters). Target is hr_zone (1–5), pace
+    (m/s low and high), or none. Repeat is iterations plus child steps, one
+    level. Legacy duration_minutes / distance_meters / heart_rate_zone /
+    speed_mps fields still normalize for this release. Unknown keys error.
+    sport other than running returns unsupported_sport and does not build a run.
+    """
+    return _create_running_workout(
+        name,
+        steps,
+        description=description,
+        workout_date=workout_date,
+        sport=sport,
+    )
+
+
+@mcp.tool()
+def workout(
+    name: str,
+    steps: List[Dict[str, Any]],
+    description: Optional[str] = None,
+    workout_date: Optional[str] = None,
+    sport: str = "running",
+) -> Dict[str, Any]:
+    """Alias of create_workout for one release."""
+    return _create_running_workout(
+        name,
+        steps,
+        description=description,
+        workout_date=workout_date,
+        sport=sport,
+    )
 
 
 def _validate_workout_date(workout_date: str) -> Optional[Dict[str, Any]]:
@@ -1446,6 +1638,7 @@ def combine_workout_templates(
     description: Optional[str] = None,
     include_nutrition_cues: bool = False,
     workout_date: Optional[str] = None,
+    sport: str = "running",
 ) -> Dict[str, Any]:
     """Combine multiple workout templates into one session.
 
@@ -1456,31 +1649,53 @@ def combine_workout_templates(
 
     Example: base 20 min + sprints + base 10 min cooldown block.
     Pass workout_date (YYYY-MM-DD) to also schedule it in the same call.
+    Keys other than template, params, and steps are an error. sport other than
+    running returns unsupported_sport.
     """
-    client, error = _get_client_or_error()
-    if error:
-        return error
-
-    if workout_date is not None:
-        date_error = _validate_workout_date(workout_date)
-        if date_error:
-            return date_error
+    if sport != "running":
+        return {"error": "unsupported_sport", "code": "unsupported_sport"}
 
     try:
+        checked = normalize_segments(segments)
+        canonical: List[Dict[str, Any]] = []
+        for segment in checked:
+            if segment.get("steps"):
+                canonical.extend(normalize_steps(segment["steps"]))
+            else:
+                canonical.extend(
+                    normalize_steps(
+                        build_template_steps(
+                            str(segment["template"]), segment.get("params") or {}
+                        )
+                    )
+                )
         running_workout = build_combined_workout(
             name,
-            segments,
+            checked,
             description=description,
             include_nutrition_cues=include_nutrition_cues,
         )
     except ValueError as exc:
         return {"error": str(exc)}
 
+    if workout_date is not None:
+        date_error = _validate_workout_date(workout_date)
+        if date_error:
+            return date_error
+
+    client, error = _get_client_or_error()
+    if error:
+        return error
+
     upload_result = _upload_running_workout(client, running_workout)
     if upload_result.get("error"):
         return upload_result
 
-    upload_result["segments"] = segments
+    upload_result["resolved_steps"] = canonical
+    upload_result["estimatedDurationMinutes"] = round(
+        running_workout.estimatedDurationInSecs / 60, 1
+    )
+    upload_result["segments"] = checked
     upload_result["heartRateZones"] = resolve_hr_context(client, get_profile()).get("zones")
     if include_nutrition_cues:
         primary_template = str(segments[0].get("template", "base")) if segments else "base"
@@ -1496,6 +1711,275 @@ def combine_workout_templates(
         )
 
     return upload_result
+
+
+@mcp.tool()
+def delete_workout(workout_id: int) -> Dict[str, Any]:
+    """Delete a library workout. Does not clear it from the calendar."""
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    result = _call_optional(client, "delete_workout", int(workout_id))
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    return {"ok": True, "workout_id": int(workout_id)}
+
+
+@mcp.tool()
+def delete_scheduled_workout(
+    schedule_id: Optional[int] = None,
+    workout_id: Optional[int] = None,
+    workout_date: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Remove a calendar workout by schedule id, or by workout id plus date.
+
+    Does not delete the library workout. The caller may name a row this server
+    did not create.
+    """
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    resolved = schedule_id
+    if resolved is None:
+        if workout_id is None or not workout_date:
+            return {"error": "Pass schedule_id, or workout_id and workout_date."}
+        item = _find_scheduled_workout(client, int(workout_id), workout_date)
+        if item is None:
+            return {"error": "No scheduled workout found for that id and date."}
+        resolved = schedule_id_from_item(item)
+        if resolved is None:
+            return {"error": "Scheduled workout has no schedule id."}
+    result = _call_optional(client, "unschedule_workout", int(resolved))
+    if isinstance(result, dict) and result.get("error"):
+        return result
+    return {"ok": True, "schedule_id": int(resolved), "workout_id": workout_id}
+
+
+@mcp.tool()
+def add_event(
+    title: str,
+    date: str,
+    distance_meters: Optional[float] = None,
+    duration_minutes: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Put a race on the Garmin calendar. Reports it only after a read shows it.
+
+    The same title and date a second time returns the existing event.
+    """
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    return create_calendar_event(
+        client,
+        _call_optional,
+        title=title,
+        event_date=date,
+        distance_meters=distance_meters,
+        duration_minutes=duration_minutes,
+    )
+
+
+@mcp.tool()
+def remove_event(event_id: int) -> Dict[str, Any]:
+    """Delete the calendar event that id names."""
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    return delete_calendar_event(client, int(event_id))
+
+
+@mcp.tool()
+def set_season(season: Dict[str, Any]) -> Dict[str, Any]:
+    """Store the season document. This is the working model, not a frozen API."""
+    try:
+        validate_season(season)
+        saved = save_season(season)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"ok": True, "season_id": saved.get("season_id")}
+
+
+@mcp.tool()
+def get_season(season_id: Optional[str] = None) -> Dict[str, Any]:
+    """Return the stored season. Does not call Garmin."""
+    document = load_season(season_id)
+    if document is None:
+        return {"error": "no_season"}
+    return document
+
+
+@mcp.tool()
+def update_season(
+    season_id: str,
+    patch: Dict[str, Any],
+    reason: str,
+) -> Dict[str, Any]:
+    """JSON merge patch. reason is required and is stored as a plan note.
+
+    A note is not a prescription change. This patch is.
+    """
+    if not reason or not str(reason).strip():
+        return {"error": "update_season requires reason"}
+    document = load_season(season_id)
+    if document is None:
+        return {"error": "no_season"}
+    merged = merge_patch(document, patch)
+    try:
+        validate_season(merged)
+        save_season(merged)
+    except ValueError as exc:
+        return {"error": str(exc)}
+    today = zoned_today(str(merged.get("timezone") or "Europe/Brussels")).isoformat()
+    note = add_note(
+        season_id,
+        date=today,
+        scope="season",
+        key=season_id,
+        text=str(reason).strip(),
+        tags=["update_season"],
+    )
+    return {"ok": True, "season_id": season_id, "note": note}
+
+
+@mcp.tool()
+def add_plan_note(
+    date: str,
+    scope: str,
+    key: str,
+    text: str,
+    tags: Optional[List[str]] = None,
+    season_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Record a decision in the plan store. This does not change the prescription."""
+    document = load_season(season_id)
+    if document is None:
+        return {"error": "no_season"}
+    try:
+        note = add_note(
+            str(document["season_id"]),
+            date=date,
+            scope=scope,
+            key=key,
+            text=text,
+            tags=tags,
+        )
+    except ValueError as exc:
+        return {"error": str(exc)}
+    return {"ok": True, "note": note}
+
+
+@mcp.tool()
+def get_plan_status(season_id: Optional[str] = None) -> Dict[str, Any]:
+    """Season facts from the database only. Does not call Garmin."""
+    document = load_season(season_id)
+    if document is None:
+        return {"error": "no_season", "warnings": ["no_season"]}
+    return build_plan_status(document)
+
+
+@mcp.tool()
+def refresh_plan_actuals(season_id: Optional[str] = None) -> Dict[str, Any]:
+    """Write the actuals snapshot from Garmin. The 28-day window includes today."""
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    document = load_season(season_id)
+    try:
+        return refresh_actuals(client, _call_optional, document, datetime.now())
+    except Exception as exc:
+        return {"error": str(exc)}
+
+
+@mcp.tool()
+def get_coaching_overview() -> Dict[str, Any]:
+    """First call of a coaching turn. Season facts, then recent load."""
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    document = load_season()
+    brief = get_coaching_brief()
+    return build_coaching_overview(
+        client,
+        _call_optional,
+        season=document,
+        brief=brief if isinstance(brief, dict) else {"error": "coaching brief unavailable"},
+    )
+
+
+@mcp.tool()
+def schedule_week(
+    week_start: str,
+    sessions: List[Dict[str, Any]],
+    dry_run: bool = False,
+    replace_existing: bool = False,
+    idempotency_key: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Upload one week. Per session, continues after a failure.
+
+    A recorded key returns skipped duplicate. A date with exactly one unrecorded
+    workout is adopted. replace_existing unschedules only future rows this server
+    recorded, and never a row it has not recorded.
+    """
+    document = load_season()
+    if document is None:
+        return {"error": "no_season"}
+    date_error = _validate_workout_date(week_start)
+    if date_error:
+        return date_error
+    prepared = [dict(session) for session in sessions]
+    if idempotency_key and len(prepared) == 1 and not prepared[0].get("idempotency_key"):
+        prepared[0]["idempotency_key"] = idempotency_key
+    snapshot = load_actuals(str(document["season_id"]))
+    if dry_run:
+        return run_schedule_week(
+            document,
+            prepared,
+            client=None,
+            call_optional=_call_optional,
+            week_start=week_start,
+            dry_run=True,
+            replace_existing=replace_existing,
+            real_today=zoned_today(str(document.get("timezone") or "Europe/Brussels")),
+            snapshot=snapshot,
+            refresh_failed=False,
+        )
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    return run_schedule_week(
+        document,
+        prepared,
+        client=client,
+        call_optional=_call_optional,
+        week_start=week_start,
+        dry_run=False,
+        replace_existing=replace_existing,
+        real_today=zoned_today(str(document.get("timezone") or "Europe/Brussels")),
+        snapshot=snapshot,
+        refresh_failed=False,
+    )
+
+
+@mcp.tool()
+def sync_block(weeks_ahead: int = 4, replace_existing: bool = False) -> Dict[str, Any]:
+    """Reconcile at most the next four weeks. Default does not delete anything."""
+    document = load_season()
+    if document is None:
+        return {"error": "no_season"}
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    snapshot = load_actuals(str(document["season_id"]))
+    return run_sync_block(
+        document,
+        client=client,
+        call_optional=_call_optional,
+        today=zoned_today(str(document.get("timezone") or "Europe/Brussels")),
+        weeks_ahead=weeks_ahead,
+        replace_existing=replace_existing,
+        snapshot=snapshot,
+    )
+
 
 mount_rest_routes(mcp)
 

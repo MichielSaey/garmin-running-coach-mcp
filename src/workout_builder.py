@@ -106,18 +106,46 @@ def _speed_bounds(step: Dict[str, Any]) -> tuple[float, float]:
     return low, high
 
 
+def _end_block(step: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    end = step.get("end")
+    return end if isinstance(end, dict) else None
+
+
+def _pace_midpoint_mps(step: Dict[str, Any]) -> Optional[float]:
+    if step.get("estimated_pace_mps") not in (None, ""):
+        pace = float(step["estimated_pace_mps"])
+        return pace if pace > 0 else None
+    target = step.get("target")
+    if isinstance(target, dict) and target.get("type") == "pace":
+        low = float(target["mps_low"])
+        high = float(target["mps_high"])
+        mid = (low + high) / 2.0
+        return mid if mid > 0 else None
+    if _uses_speed_target(step):
+        low, high = _speed_bounds(step)
+        mid = (low + high) / 2.0
+        return mid if mid > 0 else None
+    return None
+
+
 def _step_estimated_seconds(step: Dict[str, Any]) -> float:
     """Estimate wall-clock seconds for planning/nutrition (not Garmin endCondition)."""
     if step.get("estimated_duration_minutes") is not None:
         return float(step["estimated_duration_minutes"]) * 60.0
+    end = _end_block(step)
+    if end is not None and end.get("type") == "time":
+        return float(end["minutes"]) * 60.0
+    if end is not None and end.get("type") == "distance":
+        pace = _pace_midpoint_mps(step)
+        if pace:
+            return float(end["meters"]) / pace
     if step.get("duration_minutes") is not None:
         return float(step["duration_minutes"]) * 60.0
     distance = step.get("distance_meters")
-    if distance is not None and _uses_speed_target(step):
-        low, high = _speed_bounds(step)
-        mid = (low + high) / 2.0
-        if mid > 0:
-            return float(distance) / mid
+    if distance is not None:
+        pace = _pace_midpoint_mps(step)
+        if pace:
+            return float(distance) / pace
     return 0.0
 
 
@@ -159,8 +187,16 @@ def _build_executable_step(
             f"Use one of: {', '.join(sorted(VALID_STEP_TYPES))}."
         )
 
+    end = _end_block(step)
     duration_minutes = step.get("duration_minutes")
     distance_meters = step.get("distance_meters")
+    if end is not None:
+        if end.get("type") == "time":
+            duration_minutes = end.get("minutes")
+            distance_meters = None
+        elif end.get("type") == "distance":
+            distance_meters = end.get("meters")
+            duration_minutes = None
     if duration_minutes is not None and distance_meters is not None:
         raise ValueError(
             "Each step may set duration_minutes or distance_meters, not both."
@@ -182,7 +218,7 @@ def _build_executable_step(
         meters = float(distance_meters)
         if meters <= 0:
             raise ValueError("distance_meters must be positive.")
-        if not _uses_speed_target(step):
+        if _pace_midpoint_mps(step) is None:
             raise ValueError(
                 "distance_meters steps require a speed target "
                 "(target='speed' with speed_mps_min / speed_mps_max)."
@@ -192,6 +228,15 @@ def _build_executable_step(
     else:
         end_condition = _time_end_condition()
         end_value = _minutes_to_seconds(float(duration_minutes))
+
+    target_label = step.get("target")
+    if isinstance(target_label, str) and target_label.lower() == "none":
+        return ExecutableStep(
+            **common,
+            endCondition=end_condition,
+            endConditionValue=end_value,
+            targetType=_no_target(),
+        )
 
     if _uses_speed_target(step):
         speed_min, speed_max = _speed_bounds(step)
@@ -330,7 +375,7 @@ def build_running_workout(
     )
     return RunningWorkout(
         workoutName=name,
-        estimatedDurationInSecs=estimate_duration_seconds(workout_steps),
+        estimatedDurationInSecs=estimate_steps_duration_seconds(steps),
         workoutSegments=[segment],
         description=description,
     )

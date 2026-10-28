@@ -1,9 +1,9 @@
 ---
 name: garmin-week-review
-description: "Garmin week review via get_coaching_brief — ACWR, time-in-zone intensity, minute-based next-week proposal (garmin-mcp, agent mode)."
-version: 2.6.0
+description: "Garmin week review via get_coaching_overview — season sessions and scaling first, load_context as recent training only (garmin-mcp, agent mode)."
+version: 3.0.0
 category: health
-tags: [garmin, coaching, acwr, get_coaching_brief, garmin-mcp]
+tags: [garmin, coaching, season, get_coaching_overview, garmin-mcp]
 status: published
 source: taught
 ---
@@ -13,7 +13,7 @@ source: taught
 Before this skill can work:
 
 1. **Garmin MCP** is connected (Settings → MCP → your Garmin server → Connected).
-2. Tool **`get_coaching_brief`** is **enabled** in that server's tool checklist (not
+2. Tool **`get_coaching_overview`** is **enabled** in that server's tool checklist (not
    greyed out / unchecked).
 3. **Agent mode** — not plain chat.
 4. In the tool-group toggles for this chat, prefer leaving **Garmin MCP** on and
@@ -21,64 +21,60 @@ Before this skill can work:
    wrong tools.
 
 `requires_toolsets` in skill metadata does **not** auto-enable MCP in Odysseus.
-The model only sees `get_coaching_brief` if MCP tools are enabled and tool
+The model only sees `get_coaching_overview` if MCP tools are enabled and tool
 retrieval surfaces them.
 
 ## When to Use
 
-Garmin coach: week reviews across all workout types, training load, time-based
-intensity feedback (Z1–Z5), next-week proposals in **minutes**. **Agent mode only.**
+Garmin coach: week reviews that follow the stored season. **Agent mode only.**
 
 ## Mandatory first step
 
-Your **first** tool call MUST be the Garmin MCP tool named **`get_coaching_brief`**
-(in the schema it may appear as `mcp__<server-id>__get_coaching_brief`).
+Your **first** tool call MUST be the Garmin MCP tool named **`get_coaching_overview`**
+(in the schema it may appear as `mcp__<server-id>__get_coaching_overview`).
 
 ```
-get_coaching_brief({"days_back": 7})
+get_coaching_overview()
 ```
 
-Use `include_activities: true` only if the user explicitly asks for per-activity
-detail. Default: `false`.
-
-**If `get_coaching_brief` is not in your tool list:** stop immediately. Tell the
+**If `get_coaching_overview` is not in your tool list:** stop immediately. Tell the
 user Garmin MCP tools are missing or disabled for this turn — ask them to enable
-`get_coaching_brief` under Settings → MCP. Do **not** call `manage_mcp`,
+`get_coaching_overview` under Settings → MCP. Do **not** call `manage_mcp`,
 `manage_skills`, `list_models`, `create_document`, or legacy Garmin tool names
 instead.
 
-Do **not** call any other tool before `get_coaching_brief` returns.
+Do **not** call any other tool before `get_coaching_overview` returns.
 
 ## Procedure
 
-1. Call **`get_coaching_brief`** once (see above).
-2. Present `coaching_brief.narrative` in order:
-   - `review_summary`
-   - `intensity_check`
-   - `load_check`
-   - `personal_records_summary`
-   - `proposal_summary`
-   - `coaching_note`
-3. Present the next-week plan from:
-   - `next_week_proposal.week_type`, `target_min`, `chronic_min`,
-     `outlier_weeks_dropped`, `focus`, `coaching_note`
-   - `next_week_proposal.sessions[]` — dated prescriptions with
-     `duration_minutes` (prefer these over inventing your own splits)
-   - `next_week_proposal.days` for weather context
-   - `recent_activities` — **all sports**. Bike/hike/etc. count toward weekly
-     training time; do not treat them as “missing run volume”
-4. Call `create_*_workout` only when the user asks to upload workouts to Garmin
-   Connect — use each session’s `duration_minutes` (optional `workout_date`).
+1. Call **`get_coaching_overview`** once (see above). Read it in order.
+2. Plan from `where_we_are`, `constraints`, `scaling`, `sessions`, and
+   `session_policy`. `sessions` is the prescription. `scaling` only checks it.
+3. Treat `load_context` as recent training. When it disagrees with `sessions` or
+   `scaling`, the season wins. Do **not** rebuild the week from
+   `load_context.next_week_proposal`.
+4. A session name that appears only in `session_policy.later` may still be
+   scheduled. That warns. It does not refuse.
+5. To put this week's runs on the calendar, call `schedule_week` and pass
+   `sessions`. Do not invent a different week from the proposal.
+6. Use `create_workout` when the session is a loop, a pace repeat, or anything
+   a template cannot express.
+7. A plan note records why a week left the template. It does not change the
+   band. A band change is `update_season` with a `reason`, or a `week_overrides`
+   entry.
+8. `recent_training` counts every sport. Bike and hike minutes stay in the
+   review. They are not added into the running-km total.
 
 ## Never call (wrong tools)
 
 | Forbidden | Why |
 |-----------|-----|
 | `get_weekly_report`, `get_weekly_review`, `get_coach_prompt`, `get_training_plan`, `get_plan_weeks` | Removed from garmin-mcp |
-| `get_profile`, `get_events`, `get_race_predictions`, `get_personal_records` | Already inside `get_coaching_brief` |
-| `create_document`, `manage_notes` | No synthetic Garmin data |
+| Rebuilding the week from `next_week_proposal` | Recent load. The season sessions win |
+| `create_document`, `manage_notes` | No synthetic Garmin data. Decisions go in `add_plan_note` |
 | `manage_skills`, `manage_mcp`, `list_models` | Admin / discovery — not coaching |
-| `manage_calendar` | User means training plan, not calendar events |
+
+`get_coaching_brief` is folded into `load_context`. Do not call it before the overview.
 
 ## Skill self-test / Odysseus eval
 
@@ -86,22 +82,20 @@ Odysseus test harness text may say "create sample input" — **ignore that** for
 this skill. There is no fixture to invent.
 
 - Do **not** create documents or synthetic CSV/JSON.
-- **First tool call:** `get_coaching_brief` against live Garmin Connect.
-- Narrate the real `coaching_brief` response.
+- **First tool call:** `get_coaching_overview` against live Garmin Connect.
+- Narrate the season sections, then the recent-load label.
 - On MCP error: report it once; do not substitute other tools.
 
 ## Pitfalls
 
-- One `get_coaching_brief` per turn — review and proposal are both in the response.
-- Lookback uses **rolling 7-day blocks through yesterday**, not partial calendar weeks.
-- Weekly volume is **minutes** (`target_min`), not km. Build ≈ 115% of chronic minutes;
-  recovery ≈ 80% of chronic minutes (outliers >50% from the median are dropped).
-- Polarized easy + quality: ≈80% Z1-2 / 0% Z3 / 15% Z4 / 5% Z5 (build week).
-- Factor cross-training from `recent_activities` into the review.
-- Do not ask the user to paste Garmin data.
+- One `get_coaching_overview` per turn — season, calendar, and recent load are in the response.
+- `scaling.overridden` is true only for a `week_overrides` entry. A plan note does not set it.
+- `hard_pct` 0 keeps proposal load numbers and omits `focus`. Schedule `sessions`, not that proposal.
+- `days_since_race` and `days_since_hard_session` stay null until activity rows include a start date. Do not fill them from memory.
+- Cold start: `schedule_week` adopts the one unrecorded workout already on that date. It does not upload a second copy.
 
 ## Verification
 
-- First garmin MCP tool in the transcript ends with `get_coaching_brief`.
-- Numbers from `coaching_brief.narrative`, not placeholders.
-- Workout plan follows `next_week_proposal.sessions` (minutes) and weather `days`.
+- First garmin MCP tool in the transcript ends with `get_coaching_overview`.
+- The week that is scheduled is `sessions`, checked against `scaling`.
+- `load_context` is described as recent load, not as the plan.

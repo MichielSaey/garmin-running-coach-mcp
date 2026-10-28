@@ -230,6 +230,9 @@ def estimate_combined_duration_minutes(segments: List[Dict[str, Any]]) -> int:
         )
     return max(total_seconds // 60, 1)
 
+_SEGMENT_KEYS = {"template", "params", "steps"}
+
+
 def combine_template_steps(segments: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     if not segments:
         raise ValueError("Provide at least one template segment to combine.")
@@ -238,6 +241,13 @@ def combine_template_steps(segments: List[Dict[str, Any]]) -> List[Dict[str, Any
     for segment in segments:
         if not isinstance(segment, dict):
             raise ValueError("Each segment must be an object.")
+        unknown = set(segment) - _SEGMENT_KEYS
+        if unknown:
+            names = ", ".join(sorted(unknown))
+            raise ValueError(
+                f"Unknown segment keys: {names}. "
+                "A template segment only accepts template, params, and steps."
+            )
         if "steps" in segment and isinstance(segment["steps"], list):
             combined.extend(segment["steps"])
             continue
