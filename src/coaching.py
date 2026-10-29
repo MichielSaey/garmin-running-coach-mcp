@@ -54,6 +54,23 @@ def actuals_are_fresh(snapshot: dict[str, Any] | None, now: datetime) -> bool:
     return now - as_of < timedelta(hours=24)
 
 
+_BIKE_TYPES = frozenset(
+    {
+        "cycling",
+        "gravel_cycling",
+        "virtual_ride",
+        "indoor_cycling",
+        "mountain_biking",
+        "cyclocross",
+        "e_bike_mountain",
+    }
+)
+
+
+def _is_bike(kind: str | None) -> bool:
+    return kind in _BIKE_TYPES
+
+
 def summarize_activities(
     activities: list[dict[str, Any]],
     today: date,
@@ -65,6 +82,8 @@ def summarize_activities(
     runs_present = False
     other_min = 0.0
     other: list[dict[str, Any]] = []
+    training_min = 0.0
+    listed: list[dict[str, Any]] = []
     km_by_week: dict[str, float] = {}
     covered: list[str] = []
 
@@ -83,15 +102,29 @@ def summarize_activities(
         if act_day is None or act_day < start or act_day > today:
             continue
         minutes = round((activity.get("movingDuration") or activity.get("duration") or 0) / 60, 1)
+        kind = activity_type_key(activity)
+        km = round((activity.get("distance") or 0) / 1000, 2)
+        if counts_toward_run_distance(activity) or _is_bike(kind):
+            training_min += minutes
+            listed.append(
+                {
+                    "date": act_day.isoformat(),
+                    "type": kind,
+                    "name": activity.get("activityName") or activity.get("name"),
+                    "minutes": minutes,
+                    "km": km,
+                }
+            )
         if counts_toward_run_distance(activity):
             runs_present = True
-            km = round((activity.get("distance") or 0) / 1000, 2)
             run_km += km
             if longest is None or km > longest:
                 longest = km
             week = week_monday(act_day).isoformat()
             if week in km_by_week:
                 km_by_week[week] = round(km_by_week[week] + km, 2)
+            continue
+        if _is_bike(kind):
             continue
         other_min += minutes
         other.append(
@@ -104,8 +137,12 @@ def summarize_activities(
         )
 
     average = 0.0 if not runs_present else round(run_km / 4.0, 1)
+    listed.sort(key=lambda row: row["date"])
+    training_average = 0.0 if not listed else round(training_min / 4.0, 1)
     return {
         "last_4_week_avg_run_km": average,
+        "last_4_week_avg_training_min": training_average,
+        "activities": listed,
         "longest_run_last_28_days_km": longest,
         "other_sport_min": round(other_min, 1),
         "other_activities": other,
@@ -163,6 +200,8 @@ def _recent_training(
         return {
             "actuals_as_of": None,
             "last_4_week_avg_run_km": None,
+            "last_4_week_avg_training_min": None,
+            "activities": [],
             "longest_run_last_28_days_km": None,
             "days_since_race": days_since_race(season, today),
             "days_since_hard_session": None,
@@ -173,6 +212,8 @@ def _recent_training(
     return {
         "actuals_as_of": snapshot.get("as_of"),
         "last_4_week_avg_run_km": snapshot.get("last_4_week_avg_run_km"),
+        "last_4_week_avg_training_min": snapshot.get("last_4_week_avg_training_min"),
+        "activities": snapshot.get("activities") or [],
         "longest_run_last_28_days_km": snapshot.get("longest_run_last_28_days_km"),
         "days_since_race": days_since_race(season, today),
         "days_since_hard_session": None,

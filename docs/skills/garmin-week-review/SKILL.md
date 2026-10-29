@@ -57,13 +57,19 @@ Do **not** call any other tool before `get_coaching_overview` returns.
    scheduled. That warns. It does not refuse.
 5. To put this week's runs on the calendar, call `schedule_week` and pass
    `sessions`. Do not invent a different week from the proposal.
-6. Use `create_workout` when the session is a loop, a pace repeat, or anything
-   a template cannot express.
+6. Use `create_workout` when the session is a loop, a pace repeat, a gravel
+   ride, or anything a template cannot express. `sport` is `running` (the
+   default) or `gravel`. Gravel is uploaded as a cycling workout. Pass
+   `sport="gravel"` for a gravel ride. A session's `sport` field says which
+   one it is.
 7. A plan note records why a week left the template. It does not change the
    band. A band change is `update_season` with a `reason`, or a `week_overrides`
    entry.
-8. `recent_training` counts every sport. Bike and hike minutes stay in the
-   review. They are not added into the running-km total.
+8. `recent_training.activities` lists each run and each ride in the window,
+   with `type`, name, date, minutes, and km. `last_4_week_avg_training_min`
+   is those minutes divided by 4, so a gravel ride is in the average.
+   `last_4_week_avg_run_km` is running distance only and is what the kilometre
+   band checks. `other_activities` is the rest (strength, hike).
 
 ## Never call (wrong tools)
 

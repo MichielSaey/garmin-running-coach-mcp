@@ -344,8 +344,13 @@ def test_actuals_window_includes_today_and_race_distance() -> None:
     # 42.92 + 20 + 1.0 today. 30 Sep is outside today-27 days.
     assert summary["last_4_week_avg_run_km"] == pytest.approx((42.92 + 20 + 1.0) / 4, abs=0.05)
     assert summary["longest_run_last_28_days_km"] == pytest.approx(42.92)
-    assert summary["other_sport_min"] == 60
-    assert summary["other_activities"][0]["type"] == "cycling"
+    assert summary["other_sport_min"] == 0
+    assert summary["other_activities"] == []
+    assert summary["last_4_week_avg_training_min"] == pytest.approx(
+        (14000 + 20000 + 400 + 3600) / 60 / 4, abs=0.05
+    )
+    kinds = {row["type"] for row in summary["activities"]}
+    assert kinds == {"running", "trail_running", "cycling"}
     assert summary["runs_present"] is True
     assert summary["window"]["end"] == "2026-10-28"
     assert summarize_activities([], today)["last_4_week_avg_run_km"] == 0
