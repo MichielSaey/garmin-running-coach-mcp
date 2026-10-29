@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Union
 
 from garminconnect.workout import (
     ConditionType,
+    CyclingWorkout,
     ExecutableStep,
     RunningWorkout,
     StepType,
@@ -367,17 +368,21 @@ def build_running_workout(
     description: Optional[str] = None,
     default_zone: Optional[int] = None,
     sport: Optional[str] = None,
-) -> RunningWorkout:
-    from sport import garmin_sport_type
+):
+    from sport import Sport, garmin_sport_type, parse_sport
 
+    chosen = parse_sport(sport)
+    sport_type = garmin_sport_type(chosen)
+    model = CyclingWorkout if chosen is Sport.gravel else RunningWorkout
     workout_steps = build_workout_steps(steps, default_zone=default_zone)
     segment = WorkoutSegment(
         segmentOrder=1,
-        sportType=garmin_sport_type(sport),
+        sportType=sport_type,
         workoutSteps=workout_steps,
     )
-    return RunningWorkout(
+    return model(
         workoutName=name,
+        sportType=sport_type,
         estimatedDurationInSecs=estimate_steps_duration_seconds(steps),
         workoutSegments=[segment],
         description=description,

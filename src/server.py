@@ -147,7 +147,8 @@ WEEKLY_STATS_HEADERS = [
 ]
 
 
-_WRITE_METHODS = frozenset({"upload_running_workout", "schedule_workout"})
+_UPLOAD_METHODS = frozenset({"upload_running_workout", "upload_cycling_workout"})
+_WRITE_METHODS = _UPLOAD_METHODS | {"schedule_workout"}
 _RETRYABLE_EXC = (ConnectionResetError, ConnectionError, GarminConnectConnectionError)
 _LOOKUP_FAILED = object()
 
@@ -250,7 +251,7 @@ def _call_optional(client: Garmin, method: str, *args, **kwargs) -> Any:
         return None
 
     before_ids = None
-    if method == "upload_running_workout":
+    if method in _UPLOAD_METHODS:
         before_ids = _snapshot_workout_ids(client)
 
     def invoke() -> Any:
@@ -259,7 +260,7 @@ def _call_optional(client: Garmin, method: str, *args, **kwargs) -> Any:
     def landed_write() -> Any:
         if method == "schedule_workout" and len(args) >= 2:
             return _scheduled_write_landed(client, int(args[0]), str(args[1]))
-        if method == "upload_running_workout" and args:
+        if method in _UPLOAD_METHODS and args:
             return _new_uploaded_workout(client, args[0], before_ids)
         return None
 
@@ -1215,7 +1216,10 @@ def get_personal_records() -> Dict[str, Any]:
 
 
 def _upload_running_workout(client: Garmin, workout) -> Dict[str, Any]:
-    result = _call_optional(client, "upload_running_workout", workout)
+    from garminconnect.workout import CyclingWorkout
+
+    method = "upload_cycling_workout" if isinstance(workout, CyclingWorkout) else "upload_running_workout"
+    result = _call_optional(client, method, workout)
     if isinstance(result, dict) and result.get("error"):
         return result
     if not isinstance(result, dict):

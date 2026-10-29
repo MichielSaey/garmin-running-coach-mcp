@@ -12,8 +12,8 @@ class Sport(str, Enum):
 
 
 _GARMIN_SPORT = {
-    Sport.running: {"sportTypeId": 1, "sportTypeKey": "running"},
-    Sport.gravel: {"sportTypeId": 2, "sportTypeKey": "cycling"},
+    Sport.running: {"sportTypeId": 1, "sportTypeKey": "running", "displayOrder": 1},
+    Sport.gravel: {"sportTypeId": 2, "sportTypeKey": "cycling", "displayOrder": 2},
 }
 
 
@@ -31,3 +31,10 @@ def parse_sport(value: Sport | str | None = None) -> Sport:
 
 def garmin_sport_type(sport: Sport | str | None = None) -> dict[str, Any]:
     return dict(_GARMIN_SPORT[parse_sport(sport)])
+
+
+def upload_method(sport: Sport | str | None = None) -> str:
+    """Garmin client method that accepts this sport's workout model."""
+    if parse_sport(sport) is Sport.gravel:
+        return "upload_cycling_workout"
+    return "upload_running_workout"

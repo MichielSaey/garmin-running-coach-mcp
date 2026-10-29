@@ -167,9 +167,12 @@ def test_sport_defaults_to_running_and_gravel_is_cycling() -> None:
         [{"type": "interval", "duration_minutes": 60, "heart_rate_zone": 2}],
         sport="gravel",
     )
+    assert running.sportType["sportTypeKey"] == "running"
     assert running.workoutSegments[0].sportType["sportTypeKey"] == "running"
+    assert gravel.sportType["sportTypeKey"] == "cycling"
+    assert gravel.sportType["sportTypeId"] == 2
     assert gravel.workoutSegments[0].sportType["sportTypeKey"] == "cycling"
-    assert gravel.workoutSegments[0].sportType["sportTypeId"] == 2
+    assert type(gravel).__name__ == "CyclingWorkout"
 
 
 def test_create_workout_echoes_resolved_steps(plan_db) -> None:

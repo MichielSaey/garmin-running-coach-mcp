@@ -112,7 +112,10 @@ def _upload_session(
     except ValueError as exc:
         return {"date": session.get("date"), "ok": False, "error": str(exc)}
 
-    uploaded = call_optional(client, "upload_running_workout", workout)
+    from garminconnect.workout import CyclingWorkout
+
+    method = "upload_cycling_workout" if isinstance(workout, CyclingWorkout) else "upload_running_workout"
+    uploaded = call_optional(client, method, workout)
     if not isinstance(uploaded, dict) or uploaded.get("error"):
         return {
             "date": session.get("date"),
