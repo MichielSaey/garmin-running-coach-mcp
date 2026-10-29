@@ -155,6 +155,23 @@ def test_unsupported_sport_does_not_build_a_run() -> None:
     assert result["code"] == "unsupported_sport"
 
 
+def test_sport_defaults_to_running_and_gravel_is_cycling() -> None:
+    from workout_builder import build_running_workout
+
+    running = build_running_workout(
+        "Run",
+        [{"type": "interval", "duration_minutes": 30, "heart_rate_zone": 2}],
+    )
+    gravel = build_running_workout(
+        "Gravel",
+        [{"type": "interval", "duration_minutes": 60, "heart_rate_zone": 2}],
+        sport="gravel",
+    )
+    assert running.workoutSegments[0].sportType["sportTypeKey"] == "running"
+    assert gravel.workoutSegments[0].sportType["sportTypeKey"] == "cycling"
+    assert gravel.workoutSegments[0].sportType["sportTypeId"] == 2
+
+
 def test_create_workout_echoes_resolved_steps(plan_db) -> None:
     del plan_db
     mock_client = MagicMock()
@@ -175,6 +192,7 @@ def test_create_workout_echoes_resolved_steps(plan_db) -> None:
             ],
         )
     assert result["workoutId"] == 42
+    assert result["sport"] == "running"
     assert result["resolved_steps"][0]["target"]["type"] == "pace"
     assert result["estimatedDurationMinutes"] == 24.0
 

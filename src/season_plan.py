@@ -295,6 +295,7 @@ def _materialize_session(
         "distance_km_estimate": _estimate_km(float(minutes), zone),
         "note": spec.get("note"),
         "library": library_name,
+        "sport": spec.get("sport") or "running",
         "idempotency_key": f"{week_start.isoformat()}|{day.isoformat()}|{name_slug(name)}",
         "steps": steps,
     }
@@ -717,6 +718,7 @@ def export_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "distance_km_estimate": session["distance_km_estimate"],
                 "note": session.get("note"),
                 "library": session.get("library"),
+                "sport": session.get("sport") or "running",
                 "idempotency_key": session["idempotency_key"],
                 "steps": session["steps"],
             }

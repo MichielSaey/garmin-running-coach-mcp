@@ -33,6 +33,7 @@ from plan_store import (
 from scheduling import schedule_week as run_schedule_week
 from scheduling import sync_block as run_sync_block
 from season_plan import validate_season, zoned_today
+from sport import Sport, parse_sport
 from errors import (
     AUTH_FAILED,
     CONNECTION_ERROR,
@@ -1283,20 +1284,31 @@ def get_workouts(start: int = 0, limit: int = 20) -> Dict[str, Any]:
     }
 
 
+def _sport_or_error(sport: Sport | str | None) -> Sport | Dict[str, Any]:
+    try:
+        return parse_sport(sport)
+    except ValueError:
+        return {"error": "unsupported_sport", "code": "unsupported_sport"}
+
+
 def _create_running_workout(
     name: str,
     steps: List[Dict[str, Any]],
     description: Optional[str] = None,
     workout_date: Optional[str] = None,
-    sport: str = "running",
+    sport: Sport | str = Sport.running,
 ) -> Dict[str, Any]:
     """Closed step schema. ``workout`` remains an alias for one release."""
-    if sport != "running":
-        return {"error": "unsupported_sport", "code": "unsupported_sport"}
+    chosen = _sport_or_error(sport)
+    if isinstance(chosen, dict):
+        return chosen
     try:
         canonical = normalize_steps(steps)
         running_workout = build_running_workout(
-            name, canonical_to_builder(canonical), description=description
+            name,
+            canonical_to_builder(canonical),
+            description=description,
+            sport=chosen.value,
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -1314,6 +1326,7 @@ def _create_running_workout(
     if upload_result.get("error"):
         return upload_result
 
+    upload_result["sport"] = chosen.value
     upload_result["resolved_steps"] = canonical
     upload_result["estimatedDurationMinutes"] = round(
         running_workout.estimatedDurationInSecs / 60, 1
@@ -1334,15 +1347,19 @@ def create_workout(
     steps: List[Dict[str, Any]],
     description: Optional[str] = None,
     workout_date: Optional[str] = None,
-    sport: str = "running",
+    sport: Sport = Sport.running,
 ) -> Dict[str, Any]:
-    """Create a running workout from a closed step list and echo the resolved steps.
+    """Create a workout from a closed step list and echo the resolved steps.
+
+    ``sport`` is ``running`` (default) or ``gravel``. Gravel is uploaded as a
+    Garmin cycling workout. Any other value returns unsupported_sport.
 
     End is time (minutes) or distance (meters). Target is hr_zone (1–5), pace
     (m/s low and high), or none. Repeat is iterations plus child steps, one
     level. Legacy duration_minutes / distance_meters / heart_rate_zone /
     speed_mps fields still normalize for this release. Unknown keys error.
-    sport other than running returns unsupported_sport and does not build a run.
+    ``sport`` is ``running`` (default) or ``gravel``. Anything else returns
+    unsupported_sport and does not build a workout.
     """
     return _create_running_workout(
         name,
@@ -1359,7 +1376,7 @@ def workout(
     steps: List[Dict[str, Any]],
     description: Optional[str] = None,
     workout_date: Optional[str] = None,
-    sport: str = "running",
+    sport: Sport = Sport.running,
 ) -> Dict[str, Any]:
     """Alias of create_workout for one release."""
     return _create_running_workout(
@@ -1666,7 +1683,7 @@ def combine_workout_templates(
     description: Optional[str] = None,
     include_nutrition_cues: bool = False,
     workout_date: Optional[str] = None,
-    sport: str = "running",
+    sport: Sport = Sport.running,
 ) -> Dict[str, Any]:
     """Combine multiple workout templates into one session.
 
@@ -1677,11 +1694,12 @@ def combine_workout_templates(
 
     Example: base 20 min + sprints + base 10 min cooldown block.
     Pass workout_date (YYYY-MM-DD) to also schedule it in the same call.
-    Keys other than template, params, and steps are an error. sport other than
-    running returns unsupported_sport.
+    Keys other than template, params, and steps are an error. ``sport`` is
+    ``running`` (default) or ``gravel``.
     """
-    if sport != "running":
-        return {"error": "unsupported_sport", "code": "unsupported_sport"}
+    chosen = _sport_or_error(sport)
+    if isinstance(chosen, dict):
+        return chosen
 
     try:
         checked = normalize_segments(segments)
@@ -1703,6 +1721,7 @@ def combine_workout_templates(
             upload_segments,
             description=description,
             include_nutrition_cues=include_nutrition_cues,
+            sport=chosen.value,
         )
     except ValueError as exc:
         return {"error": str(exc)}
@@ -1720,6 +1739,7 @@ def combine_workout_templates(
     if upload_result.get("error"):
         return upload_result
 
+    upload_result["sport"] = chosen.value
     upload_result["resolved_steps"] = canonical
     upload_result["estimatedDurationMinutes"] = round(
         running_workout.estimatedDurationInSecs / 60, 1

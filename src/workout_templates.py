@@ -264,6 +264,7 @@ def build_template_workout(
     params: Optional[Dict[str, Any]] = None,
     description: Optional[str] = None,
     include_nutrition_cues: bool = False,
+    sport: Optional[str] = None,
 ):
     steps = build_template_steps(template, params)
     if include_nutrition_cues:
@@ -273,7 +274,7 @@ def build_template_workout(
             duration_minutes,
             intensity=intensity_for_template(template),
         )
-    return build_running_workout(name, steps, description=description)
+    return build_running_workout(name, steps, description=description, sport=sport)
 
 
 def build_combined_workout(
@@ -281,6 +282,7 @@ def build_combined_workout(
     segments: List[Dict[str, Any]],
     description: Optional[str] = None,
     include_nutrition_cues: bool = False,
+    sport: Optional[str] = None,
 ):
     steps = combine_template_steps(segments)
     if include_nutrition_cues:
@@ -291,7 +293,7 @@ def build_combined_workout(
             duration_minutes,
             intensity=intensity_for_template(primary_template),
         )
-    return build_running_workout(name, steps, description=description)
+    return build_running_workout(name, steps, description=description, sport=sport)
 
 
 TEMPLATE_DESCRIPTIONS = {

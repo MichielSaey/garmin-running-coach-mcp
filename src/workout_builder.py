@@ -366,11 +366,14 @@ def build_running_workout(
     steps: List[Dict[str, Any]],
     description: Optional[str] = None,
     default_zone: Optional[int] = None,
+    sport: Optional[str] = None,
 ) -> RunningWorkout:
+    from sport import garmin_sport_type
+
     workout_steps = build_workout_steps(steps, default_zone=default_zone)
     segment = WorkoutSegment(
         segmentOrder=1,
-        sportType={"sportTypeId": 1, "sportTypeKey": "running"},
+        sportType=garmin_sport_type(sport),
         workoutSteps=workout_steps,
     )
     return RunningWorkout(

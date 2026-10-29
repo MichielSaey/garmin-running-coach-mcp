@@ -107,6 +107,7 @@ def _upload_session(
             str(session.get("name") or "Run"),
             canonical_to_builder(canonical),
             description=session.get("note"),
+            sport=session.get("sport") or "running",
         )
     except ValueError as exc:
         return {"date": session.get("date"), "ok": False, "error": str(exc)}
