@@ -39,7 +39,13 @@ from plan_store import (
 )
 from scheduling import schedule_week as run_schedule_week
 from scheduling import sync_block as run_sync_block
-from season_plan import honoured_overrides, validate_season, week_plan, zoned_today
+from season_plan import (
+    honoured_overrides,
+    schedule_warnings,
+    validate_season,
+    week_plan,
+    zoned_today,
+)
 from sport import Sport, parse_sport
 from errors import (
     AUTH_FAILED,
@@ -2096,12 +2102,30 @@ def add_plan_note(
 def get_week_plan(week_start: str, season_id: Optional[str] = None) -> Dict[str, Any]:
     """The phase template, override, resolved band, and dated sessions for a Monday.
 
-    Does not call Garmin. ``week_start`` is that Monday.
+    Does not call Garmin. ``week_start`` is that Monday. Includes the same
+    validation warnings ``schedule_week`` would raise for that week.
     """
     document = load_season(season_id)
     if document is None:
         return {"error": "no_season"}
-    return week_plan(document, week_start)
+    plan = week_plan(document, week_start)
+    if plan.get("error"):
+        return plan
+    snapshot = load_actuals(str(document["season_id"]))
+    tz_name = str(document.get("timezone") or "Europe/Brussels")
+    stale = bool(snapshot and snapshot.get("as_of")) and not actuals_are_fresh(
+        snapshot, datetime.now(ZoneInfo(tz_name))
+    )
+    warnings, _allowed, details = schedule_warnings(
+        document,
+        plan.get("sessions") or [],
+        today=date.fromisoformat(plan["week_start"]),
+        snapshot=snapshot,
+        refresh_failed=stale,
+    )
+    plan["warnings"] = warnings
+    plan["warning_details"] = details
+    return plan
 
 
 @mcp.tool()
@@ -2161,9 +2185,10 @@ def schedule_week(
 ) -> Dict[str, Any]:
     """Upload one week. Per session, continues after a failure.
 
-    A recorded key returns skipped duplicate. A date with exactly one unrecorded
-    workout is adopted. replace_existing unschedules only future rows this server
-    recorded, and never a row it has not recorded.
+    ``dry_run`` validates locally, returns ``warnings``, and creates no workout
+    and no calendar row. A recorded key returns skipped duplicate. A date with
+    exactly one unrecorded workout is adopted. replace_existing unschedules only
+    future rows this server recorded, and never a row it has not recorded.
     """
     document = load_season()
     if document is None:

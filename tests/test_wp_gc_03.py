@@ -332,6 +332,60 @@ def test_get_week_plan_applies_the_base_override(plan_db) -> None:
     assert "Monday" in refused["error"]
 
 
+def test_dry_run_returns_warnings_and_uploads_nothing(plan_db) -> None:
+    del plan_db
+    server.set_season(example_season())
+    session = {
+        "date": "2027-01-13",
+        "type": "long",
+        "intent": "easy",
+        "name": "Wed Easy",
+        "minutes": 40,
+        "zone": 2,
+        "steps": [
+            {
+                "type": "interval",
+                "end": {"type": "time", "minutes": 40},
+                "target": {"type": "hr_zone", "zone": 2},
+            }
+        ],
+    }
+    with patch.object(server, "_get_client_or_error") as getter:
+        result = server.schedule_week("2027-01-11", [session], dry_run=True)
+    getter.assert_not_called()
+    assert any("intent long" in warning for warning in result["warnings"])
+    assert result["results"][0]["dry_run"] is True
+    assert result["created"] == 0
+
+    season = example_season()
+    season["week_overrides"] = [
+        {
+            "week_of": "2026-11-09",
+            "weekly_km": [30, 40],
+            "hard_pct": 0,
+            "sessions": [
+                {
+                    "weekday": "TUESDAY",
+                    "name": "Hills",
+                    "intent": "hard",
+                    "minutes": 40,
+                    "zone": 4,
+                    "type": "intervals",
+                }
+            ],
+        }
+    ]
+    server.set_season(season)
+    with patch.object(server, "_get_client_or_error") as getter:
+        plan = server.get_week_plan("2026-11-09")
+    getter.assert_not_called()
+    assert plan["overridden"] is True
+    assert any("hard_pct" in warning for warning in plan["warnings"])
+    detail = next(item for item in plan["warning_details"] if item["code"] == "hard_pct_exceeded")
+    assert detail["value"] == 100
+    assert detail["limit"] == 0
+
+
 def test_missing_week_band_and_longest_floor(plan_db) -> None:
     season = example_season()
     season["phases"][0].pop("weekly_km")
