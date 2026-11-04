@@ -307,6 +307,30 @@ def test_week_start_is_rejected_and_week_of_changes_this_week_target(plan_db) ->
     assert stored["honoured_overrides"][0]["overridden"] is True
 
 
+def test_get_week_plan_applies_the_base_override(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    season["week_overrides"] = [
+        {"week_of": "2026-11-09", "weekly_km": [30, 40], "reason": "base start"}
+    ]
+    server.set_season(season)
+    with patch.object(server, "_get_client_or_error") as getter:
+        plan = server.get_week_plan("2026-11-09")
+    getter.assert_not_called()
+    assert plan["phase"] == "base"
+    assert plan["overridden"] is True
+    assert plan["band"] == [30, 40]
+    assert plan["override"]["reason"] == "base start"
+    assert plan["template"]
+    assert [session["date"] for session in plan["sessions"]] == [
+        "2026-11-10",
+        "2026-11-12",
+        "2026-11-15",
+    ]
+    refused = server.get_week_plan("2026-11-10")
+    assert "Monday" in refused["error"]
+
+
 def test_missing_week_band_and_longest_floor(plan_db) -> None:
     season = example_season()
     season["phases"][0].pop("weekly_km")

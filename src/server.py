@@ -39,7 +39,7 @@ from plan_store import (
 )
 from scheduling import schedule_week as run_schedule_week
 from scheduling import sync_block as run_sync_block
-from season_plan import honoured_overrides, validate_season, zoned_today
+from season_plan import honoured_overrides, validate_season, week_plan, zoned_today
 from sport import Sport, parse_sport
 from errors import (
     AUTH_FAILED,
@@ -2090,6 +2090,18 @@ def add_plan_note(
     except ValueError as exc:
         return {"error": str(exc)}
     return {"ok": True, "note": note}
+
+
+@mcp.tool()
+def get_week_plan(week_start: str, season_id: Optional[str] = None) -> Dict[str, Any]:
+    """The phase template, override, resolved band, and dated sessions for a Monday.
+
+    Does not call Garmin. ``week_start`` is that Monday.
+    """
+    document = load_season(season_id)
+    if document is None:
+        return {"error": "no_season"}
+    return week_plan(document, week_start)
 
 
 @mcp.tool()

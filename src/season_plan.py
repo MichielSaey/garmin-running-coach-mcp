@@ -301,6 +301,21 @@ def _materialize_session(
     }
 
 
+def _template_rows(
+    band: dict[str, Any] | None,
+    monday: date,
+) -> list[dict[str, Any]]:
+    del monday
+    phase = (band or {}).get("phase")
+    if phase is None:
+        return []
+    if (band or {}).get("override_sessions"):
+        return list(band["override_sessions"])
+    if "template" in phase:
+        return list(phase.get("template") or [])
+    return _default_template(phase)
+
+
 def resolve_sessions(
     season: dict[str, Any],
     week_monday_date: date,
@@ -313,12 +328,7 @@ def resolve_sessions(
     if phase is None:
         return []
     start, end = phase_bounds(season, phase)
-    if scaling.get("override_sessions"):
-        template = scaling["override_sessions"]
-    elif "template" in phase:
-        template = phase.get("template") or []
-    else:
-        template = _default_template(phase)
+    template = _template_rows(scaling, monday)
     sessions = []
     for spec in template:
         weekday = WEEKDAYS.get(str(spec.get("weekday", "")).upper())
@@ -702,6 +712,39 @@ def schedule_warnings(
     if volume:
         warnings.append(volume)
     return warnings, allowed
+
+
+def week_plan(season: dict[str, Any], week_start: str) -> dict[str, Any]:
+    """Phase template, applied override, resolved band, and dated sessions.
+
+    ``week_start`` is the Monday. Resolution is ``band_for_week`` and
+    ``resolve_sessions``; this does not recompute the phase.
+    """
+    try:
+        monday = date.fromisoformat(str(week_start)[:10])
+    except ValueError:
+        return {"error": "week_start must be a Monday ISO date."}
+    if monday.weekday() != 0:
+        return {"error": "week_start must be a Monday ISO date."}
+    band = band_for_week(season, monday)
+    phase = band.get("phase")
+    override = None
+    for entry in season.get("week_overrides") or []:
+        if entry.get("week_of") == monday.isoformat():
+            override = entry
+            break
+    return {
+        "week_start": monday.isoformat(),
+        "phase": phase.get("name") if phase else None,
+        "template": _template_rows(band, monday),
+        "override": override if band.get("overridden") else None,
+        "band": band.get("this_week_target_km"),
+        "overridden": bool(band.get("overridden")),
+        "override_reason": band.get("override_reason"),
+        "phase_weekly_km": band.get("phase_weekly_km"),
+        "hard_pct": band.get("hard_pct"),
+        "sessions": export_sessions(resolve_sessions(season, monday, band=band)),
+    }
 
 
 def export_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
