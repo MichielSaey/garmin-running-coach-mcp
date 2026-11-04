@@ -172,6 +172,39 @@ def scheduled_workouts_between(
     return rows
 
 
+def calendar_rows_for_workout(
+    client: Any,
+    call_optional: CallOptional,
+    workout_id: int,
+    *,
+    around: date,
+) -> list[dict[str, Any]]:
+    """Calendar rows that still point at a library workout. Does not clear them."""
+    start = around - timedelta(days=21)
+    end = around + timedelta(days=180)
+    wanted = int(workout_id)
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, str]] = set()
+    for item in calendar_items(client, call_optional, start, end):
+        if not is_workout_item(item) or workout_id_from_item(item) != wanted:
+            continue
+        day = item_date(item) or ""
+        schedule_id = schedule_id_from_item(item)
+        key = (schedule_id, day)
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(
+            {
+                "schedule_id": schedule_id,
+                "date": day or None,
+                "name": item_name(item),
+            }
+        )
+    rows.sort(key=lambda row: (row["date"] or "", row["schedule_id"] or 0))
+    return rows
+
+
 def find_scheduled_by_id(
     client: Any,
     call_optional: CallOptional,

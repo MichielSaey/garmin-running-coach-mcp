@@ -906,6 +906,31 @@ def test_delete_scheduled_workout_forgets_the_idempotency_row(plan_db) -> None:
     )
 
 
+def test_delete_workout_lists_calendar_rows_that_remain(plan_db) -> None:
+    del plan_db
+    items = {
+        (2026, 11): [
+            {
+                "itemType": "workout",
+                "date": "2026-11-11",
+                "title": "Wed Vert",
+                "workoutId": 55,
+                "id": 1829,
+            }
+        ]
+    }
+    client = _october_client(items)
+    client.delete_workout.return_value = {"ok": True}
+    with patch.object(server, "_get_client_or_error", return_value=(client, None)):
+        deleted = server.delete_workout(55)
+    assert deleted["ok"] is True
+    assert deleted["workout_id"] == 55
+    assert deleted["calendar_rows"] == [
+        {"schedule_id": 1829, "date": "2026-11-11", "name": "Wed Vert"}
+    ]
+    assert "cleared" not in str(deleted).lower()
+
+
 def test_delete_scheduled_workout_names_the_row_and_expect_name_blocks(plan_db) -> None:
     del plan_db
     items = {
@@ -1550,9 +1575,12 @@ def test_october_28_overview_shape() -> None:
     assert payload["warnings"] == [
         "Garmin lists Pacte Sibérien on 2027-04-23. The season date is 2027-04-24."
     ]
-    assert "focus" not in payload["load_context"]["next_week_proposal"]
-    assert payload["load_context"]["next_week_proposal"] == {
-        "week_type": "build",
+    proposal = payload["load_context"]["recent_load_proposal"]
+    assert "next_week_proposal" not in payload["load_context"]
+    assert "focus" not in proposal
+    assert "week_type" not in proposal
+    assert proposal == {
+        "load": "build",
         "target_min": 323,
     }
     tools = {item["tool"] for item in payload["what_you_can_do"]}

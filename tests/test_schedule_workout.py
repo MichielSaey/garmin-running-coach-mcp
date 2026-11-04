@@ -33,7 +33,10 @@ def test_schedule_workout_calls_garmin_when_not_already_scheduled() -> None:
         result = server.schedule_workout(42, "2026-06-20")
 
     assert "alreadyScheduled" not in result
-    assert result["schedule"] == {"workoutScheduleId": 9001}
+    assert "schedule" not in result
+    assert result["schedule_id"] == 9001
+    assert result["workout_id"] == 42
+    assert result["date"] == "2026-06-20"
     mock_client.schedule_workout.assert_called_once_with(42, "2026-06-20")
 
 

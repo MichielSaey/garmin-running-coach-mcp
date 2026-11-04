@@ -152,7 +152,7 @@ def test_extract_workout_id_handles_common_response_shapes() -> None:
                     "workout_type": "sprint",
                 }
             ],
-            "estimated_pace_mps",
+            "estimated_pace_mps.*Example",
         ),
         (
             [{"type": "jog", "duration_minutes": 10}],

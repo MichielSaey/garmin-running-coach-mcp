@@ -12,6 +12,7 @@ from garminconnect import (
 from mcp.server.fastmcp import FastMCP
 
 from calendar_events import add_event as create_calendar_event
+from calendar_events import calendar_rows_for_workout
 from calendar_events import find_scheduled_by_id
 from calendar_events import get_event as read_calendar_event
 from calendar_events import item_date as calendar_item_day
@@ -1370,19 +1371,25 @@ def _create_running_workout(
     if upload_result.get("error"):
         return upload_result
 
-    upload_result["sport"] = chosen.value
-    upload_result["resolved_steps"] = canonical
-    upload_result["estimatedDurationMinutes"] = round(
-        running_workout.estimatedDurationInSecs / 60, 1
-    )
-    upload_result["heartRateZones"] = resolve_hr_context(client, get_profile()).get("zones")
-
+    upload_result.pop("upload", None)
     workout_id = upload_result.get("workoutId")
+    compact: Dict[str, Any] = {
+        "workout_id": workout_id,
+        "workoutId": workout_id,
+        "name": upload_result.get("workoutName") or name,
+        "resolved_steps": canonical,
+        "heartRateZones": resolve_hr_context(client, get_profile()).get("zones"),
+        "sport": chosen.value,
+        "estimatedDurationMinutes": round(running_workout.estimatedDurationInSecs / 60, 1),
+    }
     if workout_date is not None and workout_id is not None:
-        upload_result["schedule"] = _schedule_existing(
-            client, int(workout_id), workout_date
-        )
-    return upload_result
+        scheduled = _schedule_existing(client, int(workout_id), workout_date)
+        if isinstance(scheduled, dict) and scheduled.get("error"):
+            compact["schedule_error"] = scheduled["error"]
+        else:
+            compact["date"] = (scheduled or {}).get("date") or workout_date
+            compact["schedule_id"] = _schedule_id_from_schedule_result(scheduled)
+    return compact
 
 
 @mcp.tool()
@@ -1405,7 +1412,9 @@ def create_workout(
     level. Legacy duration_minutes / distance_meters / heart_rate_zone /
     speed_mps fields still normalize for this release. Unknown keys error.
     ``sport`` is ``running`` (default) or ``gravel``. Anything else returns
-    unsupported_sport and does not build a workout.
+    unsupported_sport and does not build a workout. The return is workout_id,
+    name, resolved_steps, heartRateZones, and schedule_id when a date is set.
+    The raw Garmin upload payload is omitted.
     """
     return _create_running_workout(
         name,
@@ -1466,8 +1475,40 @@ def _schedule_existing(client: Garmin, workout_id: int, workout_date: str) -> Di
 
 
 @mcp.tool()
+def _schedule_id_from_schedule_result(scheduled: Any) -> Optional[int]:
+    if not isinstance(scheduled, dict):
+        return None
+    for key in ("workoutScheduleId", "scheduledWorkoutId", "scheduleId", "schedule_id"):
+        if scheduled.get(key) is not None:
+            return int(scheduled[key])
+    inner = scheduled.get("schedule")
+    if isinstance(inner, dict):
+        found = _schedule_id_from_schedule_result(inner)
+        if found is not None:
+            return found
+        return schedule_id_from_item(inner)
+    return None
+
+
+def _name_from_schedule_item(item: Any) -> Optional[str]:
+    if not isinstance(item, dict):
+        return None
+    if item.get("title"):
+        return str(item["title"])
+    if item.get("workoutName"):
+        return str(item["workoutName"])
+    workout = item.get("workout")
+    if isinstance(workout, dict) and workout.get("workoutName"):
+        return str(workout["workoutName"])
+    return None
+
+
 def schedule_workout(workout_id: int, workout_date: str) -> Dict[str, Any]:
-    """Schedule an existing workout template on a calendar date (YYYY-MM-DD)."""
+    """Schedule an existing workout template on a calendar date (YYYY-MM-DD).
+
+    Returns workout_id, name, date, and schedule_id. The raw Garmin schedule
+    payload is not included.
+    """
     client, error = _get_client_or_error()
     if error:
         return error
@@ -1476,7 +1517,19 @@ def schedule_workout(workout_id: int, workout_date: str) -> Dict[str, Any]:
     if date_error:
         return date_error
 
-    return _schedule_existing(client, workout_id, workout_date)
+    scheduled = _schedule_existing(client, workout_id, workout_date)
+    if isinstance(scheduled, dict) and scheduled.get("error"):
+        return scheduled
+    compact: Dict[str, Any] = {
+        "workout_id": scheduled.get("workoutId"),
+        "workoutId": scheduled.get("workoutId"),
+        "name": _name_from_schedule_item(scheduled.get("schedule")),
+        "date": scheduled.get("date") or workout_date,
+        "schedule_id": _schedule_id_from_schedule_result(scheduled),
+    }
+    if scheduled.get("alreadyScheduled"):
+        compact["alreadyScheduled"] = True
+    return compact
 
 
 @mcp.tool()
@@ -1810,14 +1863,24 @@ def combine_workout_templates(
 
 @mcp.tool()
 def delete_workout(workout_id: int) -> Dict[str, Any]:
-    """Delete a library workout. Does not clear it from the calendar."""
+    """Delete a library workout. Does not clear it from the calendar.
+
+    ``calendar_rows`` are the rows still pointing at that workout id.
+    """
     client, error = _get_client_or_error()
     if error:
         return error
+    remaining = calendar_rows_for_workout(
+        client, _call_optional, int(workout_id), around=date.today()
+    )
     result = _call_optional(client, "delete_workout", int(workout_id))
     if isinstance(result, dict) and result.get("error"):
         return result
-    return {"ok": True, "workout_id": int(workout_id)}
+    return {
+        "ok": True,
+        "workout_id": int(workout_id),
+        "calendar_rows": remaining,
+    }
 
 
 @mcp.tool()
@@ -2048,6 +2111,8 @@ def update_season(
 
     A ``week_overrides`` entry is ``week_of`` (Monday ISO date), ``weekly_km``
     ``[low, high]``, and optional ``reason``, ``hard_pct``, and ``sessions``.
+    A goal may set optional ``garmin_event_id`` (preferred over the title),
+    ``distance_meters``, and ``duration_minutes``.
     """
     if not reason or not str(reason).strip():
         return {"error": "update_season requires reason"}
@@ -2188,8 +2253,10 @@ def schedule_week(
     """Upload one week. Per session, continues after a failure.
 
     ``dry_run`` validates locally, returns ``warnings``, and creates no workout
-    and no calendar row. A recorded key returns skipped duplicate. A date with
-    exactly one unrecorded workout is adopted. replace_existing unschedules only
+    and no calendar row. Each scheduled row is workout_id, name, date, and
+    schedule_id when those exist, not the raw Garmin payload. A recorded key
+    returns skipped duplicate. A date with exactly one unrecorded workout is
+    adopted. replace_existing unschedules only
     future rows this server recorded, and never a row it has not recorded.
     """
     document = load_season()

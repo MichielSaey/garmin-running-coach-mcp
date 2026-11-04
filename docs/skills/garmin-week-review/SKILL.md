@@ -52,7 +52,7 @@ Do **not** call any other tool before `get_coaching_overview` returns.
    `session_policy`. `sessions` is the prescription. `scaling` only checks it.
 3. Treat `load_context` as recent training. When it disagrees with `sessions` or
    `scaling`, the season wins. Do **not** rebuild the week from
-   `load_context.next_week_proposal`.
+   `load_context.recent_load_proposal`.
 4. A session name that appears only in `session_policy.later` may still be
    scheduled. That warns. It does not refuse.
 5. To put this week's runs on the calendar, call `schedule_week` and pass
@@ -76,7 +76,7 @@ Do **not** call any other tool before `get_coaching_overview` returns.
 | Forbidden | Why |
 |-----------|-----|
 | `get_weekly_report`, `get_weekly_review`, `get_coach_prompt`, `get_training_plan`, `get_plan_weeks` | Removed from garmin-mcp |
-| Rebuilding the week from `next_week_proposal` | Recent load. The season sessions win |
+| Rebuilding the week from `recent_load_proposal` | Recent load. The season sessions win |
 | `create_document`, `manage_notes` | No synthetic Garmin data. Decisions go in `add_plan_note` |
 | `manage_skills`, `manage_mcp`, `list_models` | Admin / discovery — not coaching |
 

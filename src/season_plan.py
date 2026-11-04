@@ -1188,19 +1188,31 @@ def load_context_from_brief(brief: dict[str, Any] | None, *, hard_pct: Any) -> d
         proposal = inner.get("next_week_proposal")
     if not isinstance(proposal, dict):
         return context
+    renamed = _load_proposal(proposal)
     if hard_pct == 0:
         kept: dict[str, Any] = {}
-        for key in ("week_type", "target_min", "chronic_min", "outlier_weeks_dropped"):
-            value = proposal.get(key)
+        for key in ("load", "target_min", "chronic_min", "outlier_weeks_dropped"):
+            value = renamed.get(key)
             if value is None:
                 continue
             if key == "outlier_weeks_dropped" and value == []:
                 continue
             kept[key] = value
-        context["next_week_proposal"] = kept
+        context["recent_load_proposal"] = kept
         return context
-    context["next_week_proposal"] = proposal
+    context["recent_load_proposal"] = renamed
     return context
+
+
+def _load_proposal(proposal: dict[str, Any]) -> dict[str, Any]:
+    """Copy a load proposal without a phase-sounding week_type key."""
+    renamed: dict[str, Any] = {}
+    for key, value in proposal.items():
+        if key == "week_type":
+            renamed["load"] = value
+        else:
+            renamed[key] = value
+    return renamed
 
 
 def _event_target(event: dict[str, Any]) -> dict[str, Any]:
