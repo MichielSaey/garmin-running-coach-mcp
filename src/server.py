@@ -12,8 +12,10 @@ from garminconnect import (
 from mcp.server.fastmcp import FastMCP
 
 from calendar_events import add_event as create_calendar_event
+from calendar_events import get_event as read_calendar_event
 from calendar_events import remove_event as delete_calendar_event
 from calendar_events import schedule_id_from_item
+from calendar_events import update_event as patch_calendar_event
 from coaching import (
     actuals_are_fresh,
     build_coaching_overview,
@@ -958,6 +960,11 @@ def get_events(months_ahead: int = 12) -> Dict[str, Any]:
             "event_id": row[6] if len(row) > 6 else None,
             "title": row[0],
             "date": row[2],
+            "target": {
+                "value": row[3],
+                "unit": row[4],
+                "unitType": row[5],
+            },
         }
         for row in upcoming_rows
     ]
@@ -1852,6 +1859,42 @@ def add_event(
     return create_calendar_event(
         client,
         _call_optional,
+        title=title,
+        event_date=date,
+        distance_meters=distance_meters,
+        duration_minutes=duration_minutes,
+    )
+
+
+@mcp.tool()
+def get_event(event_id: int) -> Dict[str, Any]:
+    """One calendar event, including its completion target (value, unit, unitType)."""
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    return read_calendar_event(client, _call_optional, int(event_id))
+
+
+@mcp.tool()
+def update_event(
+    event_id: int,
+    title: Optional[str] = None,
+    date: Optional[str] = None,
+    distance_meters: Optional[float] = None,
+    duration_minutes: Optional[float] = None,
+) -> Dict[str, Any]:
+    """Change a calendar event, then read it back.
+
+    A failed write or a read that does not show the change is an error.
+    Pass distance_meters or duration_minutes, not both.
+    """
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    return patch_calendar_event(
+        client,
+        _call_optional,
+        event_id=int(event_id),
         title=title,
         event_date=date,
         distance_meters=distance_meters,

@@ -1150,7 +1150,12 @@ def test_october_28_overview_shape() -> None:
         {"date": "2026-11-01", "name": "Sun Easy Z2", "workout_id": 1743836513},
     ]
     assert payload["calendar"]["events"] == [
-        {"event_id": 88121, "title": "Pacte Sibérien", "date": "2027-04-23"}
+        {
+            "event_id": 88121,
+            "title": "Pacte Sibérien",
+            "date": "2027-04-23",
+            "target": {"value": None, "unit": None, "unitType": None},
+        }
     ]
     assert payload["warnings"] == [
         "Garmin lists Pacte Sibérien on 2027-04-23. The season date is 2027-04-24."
@@ -1176,6 +1181,7 @@ def test_add_event_returns_existing_and_errors_when_the_write_does_not_stick() -
                 "date": "2027-04-23",
                 "title": "Pacte Sibérien",
                 "completionTarget": {"value": 100, "unit": "km", "unitType": "distance"},
+                "arg3": {"eventName": None, "name": None, "location": "Ghent"},
             }
         ]
     }
@@ -1208,6 +1214,9 @@ def test_add_event_returns_existing_and_errors_when_the_write_does_not_stick() -
     sent = client.client.post.call_args.kwargs["json"]
     assert sent["eventName"] == "Pacte Sibérien"
     assert sent["title"] == "Pacte Sibérien"
+    assert sent["arg3"]["eventName"] == "Pacte Sibérien"
+    assert sent["arg3"]["name"] == "Pacte Sibérien"
+    assert sent["arg3"]["location"] == "Ghent"
     timed = add_event(
         client,
         call,
@@ -1222,6 +1231,116 @@ def test_add_event_returns_existing_and_errors_when_the_write_does_not_stick() -
         "unit": "hour",
         "unitType": "duration",
     }
+    assert timed_body["arg3"]["eventName"] == "Pacte Sibérien"
+
+
+def test_get_events_shows_title_and_completion_target() -> None:
+    stored = {
+        "calendarItems": [
+            {
+                "itemType": "event",
+                "id": 42,
+                "date": "2027-04-24",
+                "title": "Pacte Sibérien",
+                "completionTarget": {"value": 53.0, "unit": "km", "unitType": "distance"},
+            }
+        ]
+    }
+
+    def call(client, method, *args, **kwargs):
+        del client, args
+        if method == "get_scheduled_workouts":
+            return stored
+        raise AssertionError(method)
+
+    client = MagicMock()
+    client.get_scheduled_workouts.return_value = stored
+    from calendar_events import events_between
+
+    rows = events_between(client, call, date(2027, 4, 1), date(2027, 4, 30))
+    assert rows == [
+        {
+            "event_id": 42,
+            "title": "Pacte Sibérien",
+            "date": "2027-04-24",
+            "target": {"value": 53.0, "unit": "km", "unitType": "distance"},
+        }
+    ]
+    with patch.object(server, "_get_client_or_error", return_value=(client, None)):
+        listed = server.get_events()
+    match = next(row for row in listed["events"] if row["title"] == "Pacte Sibérien")
+    assert match["target"] == {"value": 53.0, "unit": "km", "unitType": "distance"}
+
+
+def test_update_event_duration_is_visible_on_the_following_read() -> None:
+    stored = {
+        "calendarItems": [
+            {
+                "itemType": "event",
+                "id": 7,
+                "date": "2027-04-24",
+                "title": "Pacte Sibérien",
+                "eventName": "Pacte Sibérien",
+                "completionTarget": {"value": 53.0, "unit": "km", "unitType": "distance"},
+                "arg3": {"eventName": None},
+            }
+        ]
+    }
+
+    def call(client, method, *args, **kwargs):
+        del client, args
+        if method == "get_scheduled_workouts":
+            return stored
+        raise AssertionError(method)
+
+    def put(domain, path, json=None, api=None):
+        del domain, api
+        assert path.endswith("/7")
+        assert json["eventName"] == "Pacte Sibérien"
+        assert json["arg3"]["eventName"] == "Pacte Sibérien"
+        item = stored["calendarItems"][0]
+        item["title"] = json["title"]
+        item["eventName"] = json["eventName"]
+        item["date"] = json["date"]
+        item["completionTarget"] = json["completionTarget"]
+        item["arg3"] = json["arg3"]
+        return {"ok": True}
+
+    client = MagicMock()
+    client.client.put.side_effect = put
+    from calendar_events import get_event, update_event
+
+    updated = update_event(
+        client,
+        call,
+        event_id=7,
+        duration_minutes=12 * 60,
+    )
+    assert updated["ok"] is True
+    assert updated["event"]["title"] == "Pacte Sibérien"
+    assert updated["event"]["target"] == {
+        "value": 12.0,
+        "unit": "hour",
+        "unitType": "duration",
+    }
+    again = get_event(client, call, 7)
+    assert again["event"]["target"]["value"] == 12.0
+    assert again["event"]["target"]["unitType"] == "duration"
+
+    client.client.put.side_effect = RuntimeError("400 eventName")
+    failed = update_event(client, call, event_id=7, title="Renamed")
+    assert failed.get("ok") is not True
+    assert "failed" in failed["error"]
+    assert get_event(client, call, 7)["event"]["title"] == "Pacte Sibérien"
+
+    def put_without_sticking(domain, path, json=None, api=None):
+        del domain, path, json, api
+        return {"ok": True}
+
+    client.client.put.side_effect = put_without_sticking
+    missed = update_event(client, call, event_id=7, title="Still wrong")
+    assert missed.get("ok") is not True
+    assert "did not stick" in missed["error"]
 
 
 def test_accent_folded_garmin_title_still_flags_the_date_mismatch() -> None:

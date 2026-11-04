@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 from datetime import date, timedelta
 from typing import Any, Callable, Optional
 
@@ -161,9 +162,30 @@ def events_between(
         if key in seen:
             continue
         seen.add(key)
-        events.append({"event_id": event_id, "title": title, "date": day})
+        events.append(event_public_row(item))
     events.sort(key=lambda row: row["date"] or "")
     return events
+
+
+def completion_target(item: dict[str, Any]) -> dict[str, Any]:
+    raw = item.get("completionTarget")
+    if not isinstance(raw, dict):
+        raw = {}
+    return {
+        "value": raw.get("value"),
+        "unit": raw.get("unit"),
+        "unitType": raw.get("unitType"),
+    }
+
+
+def event_public_row(item: dict[str, Any]) -> dict[str, Any]:
+    """Event fields a coach can check: identity plus the completion target."""
+    return {
+        "event_id": event_id_from_item(item),
+        "title": item_name(item) or "",
+        "date": item_date(item),
+        "target": completion_target(item),
+    }
 
 
 def _http(client: Any) -> Any:
@@ -182,12 +204,18 @@ def _clone_event_payload(
     duration_minutes: float | None,
 ) -> dict[str, Any]:
     skip = {"id", "eventId", "calendarItemId", "itemType", "ownerId", "userId"}
-    payload = {key: value for key, value in template.items() if key not in skip}
+    payload = {
+        key: copy.deepcopy(value)
+        for key, value in template.items()
+        if key not in skip
+    }
     # Calendar list items expose `title`. The create API requires `eventName`.
     payload["title"] = title
     payload["eventName"] = title
     payload["name"] = title
     payload["date"] = event_date
+    # Garmin validates eventName on the body and on nested arg objects.
+    _stamp_event_title(payload, title)
     if "calendarDate" in payload:
         payload["calendarDate"] = event_date
     if distance_meters is not None:
@@ -273,6 +301,173 @@ def add_event(
     return {
         "error": "add_event did not stick: get_events does not show that title and date.",
     }
+
+
+def _blank_event_name(value: Any) -> bool:
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _stamp_event_title(node: Any, title: str) -> None:
+    """Write ``title`` into every eventName, and into a blank name or title."""
+    if isinstance(node, dict):
+        for key, value in list(node.items()):
+            if key == "eventName":
+                node[key] = title
+            elif key in {"name", "title"} and _blank_event_name(value):
+                node[key] = title
+            else:
+                _stamp_event_title(value, title)
+    elif isinstance(node, list):
+        for item in node:
+            _stamp_event_title(item, title)
+
+
+def _find_event_item(
+    client: Any,
+    call_optional: CallOptional,
+    event_id: int,
+) -> dict[str, Any] | None:
+    today = date.today()
+    start = date(today.year - 1, 1, 1)
+    end = date(today.year + 1, 12, 31)
+    wanted = int(event_id)
+    for year, month in _month_starts(start, end):
+        payload = call_optional(client, "get_scheduled_workouts", year=year, month=month)
+        if not isinstance(payload, dict) or payload.get("error"):
+            continue
+        rows = payload.get("calendarItems", [])
+        if not isinstance(rows, list):
+            continue
+        for item in rows:
+            if not isinstance(item, dict) or item.get("itemType") != "event":
+                continue
+            if event_id_from_item(item) == wanted:
+                return item
+    return None
+
+
+def _duration_minutes_of(target: dict[str, Any]) -> float | None:
+    if target.get("unitType") != "duration" or target.get("value") is None:
+        return None
+    value = float(target["value"])
+    unit = str(target.get("unit") or "")
+    if unit == "hour":
+        return value * 60.0
+    if unit == "second":
+        return value / 60.0
+    if unit == "minute":
+        return value
+    return None
+
+
+def _distance_meters_of(target: dict[str, Any]) -> float | None:
+    if target.get("unitType") != "distance" or target.get("value") is None:
+        return None
+    value = float(target["value"])
+    unit = str(target.get("unit") or "")
+    if unit in {"meter", "m"}:
+        return value
+    if unit in {"km", "kilometer"}:
+        return value * 1000.0
+    if unit == "mile":
+        return value * 1609.344
+    return None
+
+
+def _change_is_visible(
+    row: dict[str, Any],
+    *,
+    title: str | None,
+    event_date: str | None,
+    distance_meters: float | None,
+    duration_minutes: float | None,
+) -> bool:
+    if title is not None and row.get("title") != title:
+        return False
+    if event_date is not None and row.get("date") != event_date:
+        return False
+    target = row.get("target") if isinstance(row.get("target"), dict) else {}
+    if distance_meters is not None:
+        meters = _distance_meters_of(target)
+        if meters is None or abs(meters - float(distance_meters)) > 1:
+            return False
+    if duration_minutes is not None:
+        minutes = _duration_minutes_of(target)
+        if minutes is None or abs(minutes - float(duration_minutes)) > 0.1:
+            return False
+    return True
+
+
+def get_event(
+    client: Any,
+    call_optional: CallOptional,
+    event_id: int,
+) -> dict[str, Any]:
+    """One calendar event, including its completion target."""
+    item = _find_event_item(client, call_optional, event_id)
+    if item is None:
+        return {"error": f"No calendar event {int(event_id)}."}
+    return {"ok": True, "event": event_public_row(item)}
+
+
+def update_event(
+    client: Any,
+    call_optional: CallOptional,
+    *,
+    event_id: int,
+    title: str | None = None,
+    event_date: str | None = None,
+    distance_meters: float | None = None,
+    duration_minutes: float | None = None,
+) -> dict[str, Any]:
+    """PATCH the calendar event, then read it back. A miss is not success."""
+    if distance_meters is not None and duration_minutes is not None:
+        return {"error": "Pass distance_meters or duration_minutes, not both."}
+    if title is not None and not str(title).strip():
+        return {"error": "title must not be blank"}
+    if event_date is not None:
+        try:
+            date.fromisoformat(event_date)
+        except ValueError:
+            return {"error": "date must be an ISO date (YYYY-MM-DD)"}
+
+    item = _find_event_item(client, call_optional, event_id)
+    if item is None:
+        return {"error": f"No calendar event {int(event_id)}."}
+    current = event_public_row(item)
+    payload = _clone_event_payload(
+        item,
+        title=title if title is not None else str(current.get("title") or ""),
+        event_date=event_date if event_date is not None else str(current.get("date") or ""),
+        distance_meters=distance_meters,
+        duration_minutes=duration_minutes,
+    )
+    try:
+        http = _http(client)
+        http.put(
+            "connectapi",
+            f"{_EVENT_CREATE_PATH}/{int(event_id)}",
+            json=payload,
+            api=True,
+        )
+    except Exception as exc:
+        return {"error": f"update_event failed: {exc}"}
+
+    confirmed = _find_event_item(client, call_optional, event_id)
+    if confirmed is None:
+        return {"error": "update_event did not stick: get_event does not show that id."}
+    row = event_public_row(confirmed)
+    if not _change_is_visible(
+        row,
+        title=title,
+        event_date=event_date,
+        distance_meters=distance_meters,
+        duration_minutes=duration_minutes,
+    ):
+        return {
+            "error": "update_event did not stick: the following read does not show the change.",
+        }
+    return {"ok": True, "event": row}
 
 
 def remove_event(client: Any, event_id: int) -> dict[str, Any]:
