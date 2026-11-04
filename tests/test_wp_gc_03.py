@@ -1697,9 +1697,9 @@ def test_add_event_returns_existing_and_errors_when_the_write_does_not_stick() -
     assert "did not stick" in timed["error"]
     timed_body = client.client.post.call_args.kwargs["json"]
     assert timed_body["completionTarget"] == {
-        "value": 12.0,
-        "unit": "hour",
-        "unitType": "duration",
+        "value": 43200,
+        "unit": "second",
+        "unitType": "time",
     }
     assert timed_body["arg3"]["eventName"] == "Pacte Sibérien"
 
@@ -1742,70 +1742,57 @@ def test_get_events_shows_title_and_completion_target() -> None:
     assert match["target"] == {"value": 53.0, "unit": "km", "unitType": "distance"}
 
 
-def test_update_event_duration_is_visible_on_the_following_read() -> None:
-    stored = {
-        "calendarItems": [
-            {
-                "itemType": "event",
-                "id": 7,
-                "date": "2027-04-24",
-                "title": "Pacte Sibérien",
-                "eventName": "Pacte Sibérien",
-                "completionTarget": {"value": 53.0, "unit": "km", "unitType": "distance"},
-                "arg3": {"eventName": None},
-            }
-        ]
+def test_update_event_puts_the_event_resource_and_is_visible() -> None:
+    resource = {
+        "id": 7,
+        "eventName": "Pacte Sibérien",
+        "date": "2027-04-24",
+        "eventType": "trail_running",
+        "completionTarget": {"value": 53.0, "unit": "kilometer", "unitType": "distance"},
     }
+    stored = {"record": dict(resource)}
 
     def call(client, method, *args, **kwargs):
         del client, args
         if method == "get_scheduled_workouts":
-            return stored
+            return {"calendarItems": []}
         raise AssertionError(method)
+
+    def connectapi(path):
+        assert path == "/calendar-service/event/7"
+        return dict(stored["record"])
 
     def put(domain, path, json=None, api=None):
         del domain, api
-        assert path.endswith("/7")
+        assert path == "/calendar-service/event/7"
+        assert "arg3" not in json
+        assert json["eventType"] == "trail_running"
         assert json["eventName"] == "Pacte Sibérien"
-        assert json["arg3"]["eventName"] == "Pacte Sibérien"
-        item = stored["calendarItems"][0]
-        item["title"] = json["title"]
-        item["eventName"] = json["eventName"]
-        item["date"] = json["date"]
-        item["completionTarget"] = json["completionTarget"]
-        item["arg3"] = json["arg3"]
-        return {"ok": True}
+        stored["record"] = dict(json)
+        return {}
 
     client = MagicMock()
+    client.client.connectapi.side_effect = connectapi
     client.client.put.side_effect = put
-    from calendar_events import get_event, update_event
+    from calendar_events import update_event
 
-    updated = update_event(
-        client,
-        call,
-        event_id=7,
-        duration_minutes=12 * 60,
-    )
+    updated = update_event(client, call, event_id=7, duration_minutes=12 * 60)
     assert updated["ok"] is True
     assert updated["event"]["title"] == "Pacte Sibérien"
     assert updated["event"]["target"] == {
-        "value": 12.0,
-        "unit": "hour",
-        "unitType": "duration",
+        "value": 43200,
+        "unit": "second",
+        "unitType": "time",
     }
-    again = get_event(client, call, 7)
-    assert again["event"]["target"]["value"] == 12.0
-    assert again["event"]["target"]["unitType"] == "duration"
 
-    client.client.put.side_effect = RuntimeError("400 eventName")
+    client.client.put.side_effect = RuntimeError("500 EventActivityType:90")
     failed = update_event(client, call, event_id=7, title="Renamed")
     assert failed.get("ok") is not True
     assert "failed" in failed["error"]
-    assert get_event(client, call, 7)["event"]["title"] == "Pacte Sibérien"
 
     def put_without_sticking(domain, path, json=None, api=None):
         del domain, path, json, api
-        return {"ok": True}
+        return {}
 
     client.client.put.side_effect = put_without_sticking
     missed = update_event(client, call, event_id=7, title="Still wrong")

@@ -77,7 +77,7 @@ def item_name(item: dict[str, Any]) -> Optional[str]:
     workout = item.get("workout")
     if isinstance(workout, dict) and workout.get("workoutName"):
         return str(workout["workoutName"])
-    for key in ("workoutName", "name"):
+    for key in ("eventName", "workoutName", "name"):
         if item.get(key):
             return str(item[key])
     return None
@@ -275,6 +275,32 @@ def _http(client: Any) -> Any:
     return http
 
 
+# Calendar-feed items carry activity-type metadata. The event endpoint cannot
+# read it, so echoing it back 500s ("EventActivityType:90").
+_MONTH_FEED_ITEM_KEYS = {"activityTypeId", "activityType"}
+
+
+def _sport_key(value: Any) -> str | None:
+    """The string sport key Garmin's event endpoint accepts."""
+    if isinstance(value, str):
+        return value.strip() or None
+    if isinstance(value, dict):
+        for key in ("typeKey", "key", "sportTypeKey"):
+            candidate = value.get(key)
+            if isinstance(candidate, str) and candidate.strip():
+                return candidate.strip()
+    return None
+
+
+def _time_target(minutes: float) -> dict[str, Any]:
+    """A time-based completion target. Garmin stores whole seconds as unitType time."""
+    return {
+        "value": int(round(float(minutes) * 60.0)),
+        "unit": "second",
+        "unitType": "time",
+    }
+
+
 def _clone_event_payload(
     template: dict[str, Any],
     *,
@@ -283,7 +309,10 @@ def _clone_event_payload(
     distance_meters: float | None,
     duration_minutes: float | None,
 ) -> dict[str, Any]:
-    skip = {"id", "eventId", "calendarItemId", "itemType", "ownerId", "userId"}
+    skip = (
+        {"id", "eventId", "calendarItemId", "itemType", "ownerId", "userId"}
+        | _MONTH_FEED_ITEM_KEYS
+    )
     payload = {
         key: copy.deepcopy(value)
         for key, value in template.items()
@@ -294,6 +323,12 @@ def _clone_event_payload(
     payload["eventName"] = title
     payload["name"] = title
     payload["date"] = event_date
+    # eventType has to be a sport key string; a feed object or id 500s.
+    sport_key = _sport_key(payload.get("eventType"))
+    if sport_key is not None:
+        payload["eventType"] = sport_key
+    else:
+        payload.pop("eventType", None)
     # Garmin validates eventName on the body and on nested arg objects.
     _stamp_event_title(payload, title)
     if "calendarDate" in payload:
@@ -305,16 +340,7 @@ def _clone_event_payload(
             "unitType": "distance",
         }
     elif duration_minutes is not None:
-        minutes = float(duration_minutes)
-        if minutes % 60 == 0:
-            value, unit = minutes / 60.0, "hour"
-        else:
-            value, unit = minutes * 60.0, "second"
-        payload["completionTarget"] = {
-            "value": value,
-            "unit": unit,
-            "unitType": "duration",
-        }
+        payload["completionTarget"] = _time_target(duration_minutes)
     return payload
 
 
@@ -427,7 +453,7 @@ def _find_event_item(
 
 
 def _duration_minutes_of(target: dict[str, Any]) -> float | None:
-    if target.get("unitType") != "duration" or target.get("value") is None:
+    if target.get("unitType") not in {"duration", "time"} or target.get("value") is None:
         return None
     value = float(target["value"])
     unit = str(target.get("unit") or "")
@@ -490,6 +516,14 @@ def get_event(
     return {"ok": True, "event": event_public_row(item)}
 
 
+def _read_event_resource(client: Any, event_id: int) -> dict[str, Any]:
+    """The stored event as ``/calendar-service/event/{id}`` returns it."""
+    payload = _http(client).connectapi(f"{_EVENT_CREATE_PATH}/{int(event_id)}")
+    if not isinstance(payload, dict):
+        return {}
+    return payload
+
+
 def update_event(
     client: Any,
     call_optional: CallOptional,
@@ -500,7 +534,7 @@ def update_event(
     distance_meters: float | None = None,
     duration_minutes: float | None = None,
 ) -> dict[str, Any]:
-    """PATCH the calendar event, then read it back. A miss is not success."""
+    """Read the stored event, overlay the change, PUT the whole record, read back."""
     if distance_meters is not None and duration_minutes is not None:
         return {"error": "Pass distance_meters or duration_minutes, not both."}
     if title is not None and not str(title).strip():
@@ -511,17 +545,27 @@ def update_event(
         except ValueError:
             return {"error": "date must be an ISO date (YYYY-MM-DD)"}
 
-    item = _find_event_item(client, call_optional, event_id)
-    if item is None:
+    try:
+        record = _read_event_resource(client, event_id)
+    except Exception as exc:
+        return {"error": f"update_event failed: {exc}"}
+    if not record:
         return {"error": f"No calendar event {int(event_id)}."}
-    current = event_public_row(item)
-    payload = _clone_event_payload(
-        item,
-        title=title if title is not None else str(current.get("title") or ""),
-        event_date=event_date if event_date is not None else str(current.get("date") or ""),
-        distance_meters=distance_meters,
-        duration_minutes=duration_minutes,
-    )
+
+    payload = copy.deepcopy(record)
+    if title is not None:
+        payload["eventName"] = title
+    if event_date is not None:
+        payload["date"] = event_date
+    if distance_meters is not None:
+        payload["completionTarget"] = {
+            "value": distance_meters,
+            "unit": "meter",
+            "unitType": "distance",
+        }
+    elif duration_minutes is not None:
+        payload["completionTarget"] = _time_target(duration_minutes)
+
     try:
         http = _http(client)
         http.put(
@@ -533,8 +577,11 @@ def update_event(
     except Exception as exc:
         return {"error": f"update_event failed: {exc}"}
 
-    confirmed = _find_event_item(client, call_optional, event_id)
-    if confirmed is None:
+    try:
+        confirmed = _read_event_resource(client, event_id)
+    except Exception as exc:
+        return {"error": f"update_event failed: {exc}"}
+    if not confirmed:
         return {"error": "update_event did not stick: get_event does not show that id."}
     row = event_public_row(confirmed)
     if not _change_is_visible(

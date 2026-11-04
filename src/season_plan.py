@@ -1240,7 +1240,7 @@ def _meters_of(target: dict[str, Any]) -> float | None:
 
 
 def _minutes_of(target: dict[str, Any]) -> float | None:
-    if target.get("unitType") != "duration" or target.get("value") is None:
+    if target.get("unitType") not in {"duration", "time"} or target.get("value") is None:
         return None
     value = float(target["value"])
     unit = str(target.get("unit") or "")
