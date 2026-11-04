@@ -9,6 +9,7 @@ from calendar_events import (
     calendar_items,
     is_workout_item,
     item_date,
+    item_name,
     schedule_id_from_item,
     tied_to_completed_activity,
     workout_id_from_item,
@@ -55,6 +56,25 @@ def _workouts_on_date(client: Any, call_optional: CallOptional, day: str) -> lis
             continue
         rows.append(item)
     return rows
+
+
+def _with_identity(
+    row: dict[str, Any],
+    session: dict[str, Any],
+    *,
+    schedule_id: Any = None,
+    workout_id: Any = None,
+    name: str | None = None,
+) -> dict[str, Any]:
+    """Attach the resolved name and ids when this row actually has them."""
+    resolved = name if name is not None else session.get("name")
+    if resolved:
+        row["name"] = str(resolved)
+    if workout_id is not None:
+        row["workout_id"] = int(workout_id)
+    if schedule_id is not None:
+        row["schedule_id"] = int(schedule_id)
+    return row
 
 
 def _schedule_id_from_upload(result: Any) -> Optional[int]:
@@ -133,12 +153,16 @@ def _upload_session(
             workout_id=int(workout_id),
             schedule_id=None,
         )
-        return {
-            "date": session.get("date"),
-            "ok": False,
-            "workout_id": int(workout_id),
-            "error": scheduled["error"],
-        }
+        return _with_identity(
+            {
+                "date": session.get("date"),
+                "ok": False,
+                "error": scheduled["error"],
+            },
+            session,
+            workout_id=int(workout_id),
+            name=str(session.get("name") or "Run"),
+        )
     schedule_id = _schedule_id_from_upload(scheduled)
     save_schedule_record(
         idempotency_key=session["idempotency_key"],
@@ -146,7 +170,13 @@ def _upload_session(
         workout_id=int(workout_id),
         schedule_id=schedule_id,
     )
-    return {"date": session["date"], "ok": True, "workout_id": int(workout_id)}
+    return _with_identity(
+        {"date": session["date"], "ok": True},
+        session,
+        workout_id=int(workout_id),
+        schedule_id=schedule_id,
+        name=str(session.get("name") or "Run"),
+    )
 
 
 def _schedule_one(
@@ -164,12 +194,15 @@ def _schedule_one(
             client, "schedule_workout", int(record["workout_id"]), session["date"]
         )
         if isinstance(scheduled, dict) and scheduled.get("error"):
-            return {
-                "date": session["date"],
-                "ok": False,
-                "workout_id": int(record["workout_id"]),
-                "error": scheduled["error"],
-            }
+            return _with_identity(
+                {
+                    "date": session["date"],
+                    "ok": False,
+                    "error": scheduled["error"],
+                },
+                session,
+                workout_id=int(record["workout_id"]),
+            )
         schedule_id = _schedule_id_from_upload(scheduled)
         save_schedule_record(
             idempotency_key=key,
@@ -177,14 +210,20 @@ def _schedule_one(
             workout_id=int(record["workout_id"]),
             schedule_id=schedule_id,
         )
-        return {
-            "date": session["date"],
-            "ok": True,
-            "workout_id": int(record["workout_id"]),
-        }
+        return _with_identity(
+            {"date": session["date"], "ok": True},
+            session,
+            workout_id=int(record["workout_id"]),
+            schedule_id=schedule_id,
+        )
     if record is not None:
         if not replace_existing or date.fromisoformat(session["date"]) < real_today:
-            return {"date": session["date"], "ok": True, "skipped": "duplicate"}
+            return _with_identity(
+                {"date": session["date"], "ok": True, "skipped": "duplicate"},
+                session,
+                workout_id=record.get("workout_id"),
+                schedule_id=record.get("schedule_id"),
+            )
         error = _unschedule_recorded(client, call_optional, record, session["date"])
         if error:
             return {"date": session["date"], "ok": False, "error": error}
@@ -208,13 +247,20 @@ def _schedule_one(
     if len(unrecorded) == 1:
         item = unrecorded[0]
         workout_id = int(workout_id_from_item(item))
+        adopted_schedule_id = schedule_id_from_item(item)
         save_schedule_record(
             idempotency_key=key,
             date=session["date"],
             workout_id=workout_id,
-            schedule_id=schedule_id_from_item(item),
+            schedule_id=adopted_schedule_id,
         )
-        return {"date": session["date"], "ok": True, "adopted": True, "workout_id": workout_id}
+        return _with_identity(
+            {"date": session["date"], "ok": True, "adopted": True},
+            session,
+            workout_id=workout_id,
+            schedule_id=adopted_schedule_id,
+            name=session.get("name") or item_name(item),
+        )
 
     if on_date:
         return {

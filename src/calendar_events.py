@@ -49,6 +49,28 @@ def event_id_from_item(item: dict[str, Any]) -> Optional[int]:
     return None
 
 
+def item_sport(item: dict[str, Any]) -> Optional[str]:
+    sport = item.get("sport")
+    if isinstance(sport, str) and sport.strip():
+        return sport
+    sport_type = item.get("sportType")
+    if isinstance(sport_type, dict):
+        key = sport_type.get("sportTypeKey") or sport_type.get("key")
+        if key:
+            return str(key)
+    if isinstance(sport_type, str) and sport_type.strip():
+        return sport_type
+    return None
+
+
+def item_source(item: dict[str, Any]) -> Optional[str]:
+    for key in ("source", "workoutSource", "scheduleSource"):
+        value = item.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
 def item_name(item: dict[str, Any]) -> Optional[str]:
     if item.get("title"):
         return str(item["title"])
@@ -139,6 +161,12 @@ def scheduled_workouts_between(
         }
         if schedule_id is not None:
             row["schedule_id"] = schedule_id
+        sport = item_sport(item)
+        if sport is not None:
+            row["sport"] = sport
+        source = item_source(item)
+        if source is not None:
+            row["source"] = source
         rows.append(row)
     rows.sort(key=lambda row: (row["date"] or "", row["workout_id"]))
     return rows

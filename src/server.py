@@ -15,6 +15,7 @@ from calendar_events import add_event as create_calendar_event
 from calendar_events import get_event as read_calendar_event
 from calendar_events import remove_event as delete_calendar_event
 from calendar_events import schedule_id_from_item
+from calendar_events import scheduled_workouts_between
 from calendar_events import update_event as patch_calendar_event
 from coaching import (
     actuals_are_fresh,
@@ -1808,6 +1809,26 @@ def delete_workout(workout_id: int) -> Dict[str, Any]:
 
 
 @mcp.tool()
+def list_scheduled_workouts(start: str, end: str) -> Any:
+    """Calendar workouts from ``start`` through ``end``, inclusive.
+
+    Each row is schedule_id, workout_id, name, sport, date, and source.
+    sport and source are omitted when the calendar item does not have them.
+    """
+    try:
+        start_day = date.fromisoformat(start)
+        end_day = date.fromisoformat(end)
+    except (ValueError, TypeError):
+        return {"error": "start and end must be ISO dates (YYYY-MM-DD)"}
+    if end_day < start_day:
+        return {"error": "end must be on or after start"}
+    client, error = _get_client_or_error()
+    if error:
+        return error
+    return scheduled_workouts_between(client, _call_optional, start_day, end_day)
+
+
+@mcp.tool()
 def delete_scheduled_workout(
     schedule_id: Optional[int] = None,
     workout_id: Optional[int] = None,
@@ -2026,6 +2047,7 @@ def get_coaching_overview() -> Dict[str, Any]:
 
     A Garmin 429 or other refresh failure keeps the last snapshot. The call
     still returns the season, the sessions, and that snapshot.
+    The calendar lists the current week only (today through seven days).
     """
     client, error = _get_client_or_error()
     document = load_season()

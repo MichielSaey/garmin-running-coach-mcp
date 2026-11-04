@@ -18,6 +18,7 @@ from scheduling import sync_block as run_sync_block
 from season_plan import (
     band_for_week,
     example_season,
+    export_sessions,
     promote_last_race,
     resolve_sessions,
     status_warnings,
@@ -410,7 +411,7 @@ def test_schedule_week_adopts_then_is_idempotent(plan_db) -> None:
     season = example_season()
     server.set_season(season)
     client = _october_client(OCTOBER_ITEMS)
-    sessions = server.get_plan_status()["sessions"]
+    sessions = export_sessions(resolve_sessions(season, date(2026, 10, 26)))
     first = run_schedule_week(
         season,
         sessions,
@@ -425,6 +426,8 @@ def test_schedule_week_adopts_then_is_idempotent(plan_db) -> None:
         "ok": True,
         "adopted": True,
         "workout_id": 1743836513,
+        "schedule_id": 13,
+        "name": "Sun Easy",
     }
     assert by_date["2026-10-28"]["workout_id"] == 1743836620
     assert by_date["2026-10-30"]["workout_id"] == 1743836502
@@ -441,7 +444,82 @@ def test_schedule_week_adopts_then_is_idempotent(plan_db) -> None:
     assert second["created"] == 0
     assert second["skipped"] == 3
     assert all(row.get("skipped") == "duplicate" for row in second["results"])
+    assert all(row.get("schedule_id") for row in second["results"])
     client.upload_running_workout.assert_not_called()
+
+
+def test_schedule_three_list_then_delete_each_schedule_id(plan_db) -> None:
+    del plan_db
+    season = example_season()
+    server.set_season(season)
+    items: list[dict] = []
+    names: dict[int, str] = {}
+    seq = {"n": 0}
+
+    def scheduled(year, month):
+        prefix = f"{year:04d}-{month:02d}"
+        return {
+            "calendarItems": [
+                item for item in items if str(item["date"]).startswith(prefix)
+            ]
+        }
+
+    def upload(workout):
+        seq["n"] += 1
+        workout_id = 1000 + seq["n"]
+        names[workout_id] = workout.workoutName
+        return {"workoutId": workout_id, "workoutName": workout.workoutName}
+
+    def schedule(workout_id, day):
+        seq["n"] += 1
+        schedule_id = 5000 + seq["n"]
+        items.append(
+            {
+                "itemType": "workout",
+                "date": day,
+                "title": names.get(int(workout_id), "session"),
+                "workoutId": int(workout_id),
+                "id": schedule_id,
+                "sportType": {"sportTypeKey": "running"},
+            }
+        )
+        return {"workoutScheduleId": schedule_id}
+
+    def unschedule(schedule_id):
+        items[:] = [item for item in items if item["id"] != int(schedule_id)]
+        return {"ok": True}
+
+    client = MagicMock()
+    client.get_scheduled_workouts.side_effect = scheduled
+    client.upload_running_workout.side_effect = upload
+    client.schedule_workout.side_effect = schedule
+    client.unschedule_workout.side_effect = unschedule
+    sessions = export_sessions(resolve_sessions(season, date(2026, 10, 26)))
+    assert len(sessions) == 3
+    result = run_schedule_week(
+        season,
+        sessions,
+        client=client,
+        call_optional=_call,
+        week_start="2026-10-26",
+        real_today=date(2026, 10, 26),
+    )
+    assert len(result["results"]) == 3
+    assert all(row.get("ok") for row in result["results"])
+    assert all(row.get("schedule_id") for row in result["results"])
+    assert all(row.get("name") for row in result["results"])
+
+    with patch.object(server, "_get_client_or_error", return_value=(client, None)):
+        listed = server.list_scheduled_workouts("2026-10-26", "2026-11-01")
+        assert {row["schedule_id"] for row in listed} == {
+            row["schedule_id"] for row in result["results"]
+        }
+        assert all(row["sport"] == "running" for row in listed)
+        assert all("source" not in row for row in listed)
+        for row in result["results"]:
+            deleted = server.delete_scheduled_workout(schedule_id=row["schedule_id"])
+            assert deleted["ok"] is True
+        assert server.list_scheduled_workouts("2026-10-26", "2026-11-01") == []
 
 
 def test_schedule_week_partial_retry_adopts_only_the_missing_dates(plan_db) -> None:
@@ -604,6 +682,9 @@ def test_failed_schedule_retries_without_a_second_upload(plan_db) -> None:
         real_today=date(2026, 10, 28),
     )
     assert first["results"][0]["ok"] is False
+    assert first["results"][0]["name"] == "Wed Easy"
+    assert first["results"][0]["workout_id"] == 999
+    assert "schedule_id" not in first["results"][0]
     second = run_schedule_week(
         season,
         [session],
@@ -614,6 +695,8 @@ def test_failed_schedule_retries_without_a_second_upload(plan_db) -> None:
     )
     assert second["results"][0]["ok"] is True
     assert second["results"][0]["workout_id"] == 999
+    assert second["results"][0]["schedule_id"] == 77
+    assert second["results"][0]["name"] == "Wed Easy"
     assert client.upload_running_workout.call_count == 1
     assert client.schedule_workout.call_count == 2
 
