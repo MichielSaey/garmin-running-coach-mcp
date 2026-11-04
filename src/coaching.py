@@ -22,7 +22,8 @@ from season_plan import (
     resolve_sessions,
     scaling_block,
     session_policy,
-    status_warnings,
+    status_warning_details,
+    warning_detail,
     week_monday,
     what_you_can_do,
     where_we_are,
@@ -255,7 +256,7 @@ def build_plan_status(
     scaling = scaling_block(band, sessions)
     policy = session_policy(season, today)
     stale = not actuals_are_fresh(snapshot, moment)
-    warnings = status_warnings(
+    warning_rows = status_warning_details(
         season,
         today,
         snapshot,
@@ -263,6 +264,7 @@ def build_plan_status(
         events=(snapshot or {}).get("events") if snapshot else [],
         sessions=sessions,
     )
+    warnings = [item["message"] for item in warning_rows]
     training = _recent_training(season, snapshot, today)
     presented = _present_where(where)
     return {
@@ -276,6 +278,7 @@ def build_plan_status(
         "recent_notes": notes,
         "recent_training": training,
         "warnings": warnings,
+        "warning_details": warning_rows,
         "current_goal": presented.get("current_goal"),
         "next_goal": presented.get("next_goal"),
         "days_to_goal": presented.get("days_to_goal"),
@@ -356,6 +359,11 @@ def build_coaching_overview(
     # snapshot is still inside 24h — it is not to be trusted for the delta.
     if refresh_failed:
         status["warnings"] = [item for item in status["warnings"] if "15%" not in item]
+        status["warning_details"] = [
+            item
+            for item in status.get("warning_details") or []
+            if "15%" not in str(item.get("message"))
+        ]
     week_end = today + timedelta(days=7)
     calendar = _calendar(client, call_optional, today, week_end)
     events = (snapshot or {}).get("events") or []
@@ -364,12 +372,31 @@ def build_coaching_overview(
         events = calendar["events"]
     mismatch = garmin_date_mismatch(season, events if isinstance(events, list) else [])
     warnings = list(status["warnings"])
+    details = list(status.get("warning_details") or [])
     if mismatch and mismatch not in warnings:
         warnings.append(mismatch)
+        details.append(
+            warning_detail(
+                "garmin_date_mismatch",
+                mismatch,
+                basis="Garmin event date against the season goal date",
+                hint="Move the Garmin event onto the season date.",
+            )
+        )
     if refresh_failed:
         warnings = [item for item in warnings if "15%" not in item]
-        warnings.append(
-            "Garmin actuals were not refreshed. Showing the last snapshot."
+        details = [
+            item for item in details if "15%" not in str(item.get("message"))
+        ]
+        refresh_message = "Garmin actuals were not refreshed. Showing the last snapshot."
+        warnings.append(refresh_message)
+        details.append(
+            warning_detail(
+                "actuals_not_refreshed",
+                refresh_message,
+                basis="last saved snapshot",
+                hint="Retry the overview when Garmin answers.",
+            )
         )
     active = goal_by_id(season, season.get("active_goal_id"))
     goal_date = (active or {}).get("date")
@@ -394,6 +421,7 @@ def build_coaching_overview(
         "recent_training": status["recent_training"],
         "calendar": calendar,
         "warnings": warnings,
+        "warning_details": details,
         "load_context": load_context_from_brief(brief, hard_pct=hard_pct),
         "what_you_can_do": what_you_can_do(
             has_sessions=bool(status["sessions"]),

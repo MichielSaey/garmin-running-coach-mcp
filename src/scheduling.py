@@ -25,6 +25,7 @@ from season_plan import (
     name_slug,
     resolve_sessions,
     schedule_warnings,
+    warning_detail,
     week_monday,
 )
 from step_schema import canonical_to_builder, normalize_steps
@@ -290,7 +291,7 @@ def schedule_week(
     phase_day = date.fromisoformat(week_start)
     clock = real_today or phase_day
     prepared = [_ensure_key(session, week_start) for session in sessions]
-    warnings, allowed = schedule_warnings(
+    warnings, allowed, details = schedule_warnings(
         season,
         prepared,
         today=phase_day,
@@ -316,7 +317,16 @@ def schedule_week(
             real_today=clock,
         )
         if outcome.get("warning"):
-            warnings.append(str(outcome["warning"]))
+            message = str(outcome["warning"])
+            warnings.append(message)
+            details.append(
+                warning_detail(
+                    "calendar_conflict",
+                    message,
+                    basis="calendar rows already on that date",
+                    hint="Delete or adopt the existing row before uploading another.",
+                )
+            )
         results.append(outcome)
 
     created = 0
@@ -334,6 +344,7 @@ def schedule_week(
         "skipped": skipped,
         "failed": failed,
         "warnings": warnings,
+        "warning_details": details,
         "results": results,
     }
 

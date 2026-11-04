@@ -604,29 +604,118 @@ def longest_run_warning(goal: dict[str, Any] | None, longest_km: float | None) -
     return None
 
 
+def warning_detail(
+    code: str,
+    message: str,
+    *,
+    value: Any = None,
+    limit: Any = None,
+    basis: str,
+    hint: str,
+) -> dict[str, Any]:
+    return {
+        "code": code,
+        "message": message,
+        "value": value,
+        "limit": limit,
+        "basis": basis,
+        "hint": hint,
+    }
+
+
+def _reduced_load_week(season: dict[str, Any], monday: date) -> bool:
+    """Recovery, taper, return, and deload weeks are not a full training week."""
+    phase = current_phase(season, monday)
+    if _recovery_or_taper(phase):
+        return True
+    kind = str((phase or {}).get("kind") or (phase or {}).get("name") or "").lower()
+    if kind in {"return_to_run", "return"}:
+        return True
+    return bool(band_for_week(season, monday).get("deload_week"))
+
+
+def _volume_baseline(
+    snapshot: dict[str, Any],
+    season: dict[str, Any] | None,
+) -> tuple[float | None, str]:
+    """Run-km baseline. Recovery and taper weeks are left out of the average."""
+    raw = snapshot.get("last_4_week_avg_run_km")
+    plain = "4-week run-km average"
+    weeks = snapshot.get("run_km_by_week")
+    if season is None or not isinstance(weeks, dict) or not weeks:
+        return (None if raw is None else float(raw), plain)
+    kept: list[float] = []
+    excluded = 0
+    for key, km in weeks.items():
+        try:
+            monday = date.fromisoformat(str(key)[:10])
+            distance = float(km)
+        except (TypeError, ValueError):
+            continue
+        if _reduced_load_week(season, monday):
+            excluded += 1
+            continue
+        kept.append(distance)
+    if excluded and kept:
+        return (
+            round(sum(kept) / len(kept), 1),
+            "4-week run-km average with recovery and taper weeks excluded",
+        )
+    if excluded and not kept:
+        return (
+            None,
+            "4-week run-km average with recovery and taper weeks excluded",
+        )
+    return (None if raw is None else float(raw), plain)
+
+
 def volume_warning(
     estimate: float | None,
     snapshot: dict[str, Any] | None,
     *,
     refresh_failed: bool,
+    season: dict[str, Any] | None = None,
+    today: date | None = None,
 ) -> str | None:
     """+15% only. A cut, a missing snapshot, a bad zero, or a failed refresh do not warn."""
+    del today
+    detail = volume_warning_detail(
+        estimate, snapshot, refresh_failed=refresh_failed, season=season
+    )
+    if detail is None:
+        return None
+    return str(detail["message"])
+
+
+def volume_warning_detail(
+    estimate: float | None,
+    snapshot: dict[str, Any] | None,
+    *,
+    refresh_failed: bool,
+    season: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
     if refresh_failed or not snapshot or snapshot.get("as_of") is None:
         return None
     if estimate is None:
         return None
-    avg = snapshot.get("last_4_week_avg_run_km")
+    avg, basis = _volume_baseline(snapshot, season)
     if avg is None:
         return None
     runs_present = bool(snapshot.get("runs_present"))
-    if not runs_present:
-        return None
-    if runs_present and float(avg) == 0:
+    if not runs_present or float(avg) == 0:
         return None
     if float(estimate) < float(avg):
         return None
+    limit = round(float(avg) * 1.15, 1)
     if float(estimate) > float(avg) * 1.15:
-        return "Weekly volume is more than 15% above the 4-week average."
+        return warning_detail(
+            "volume_above_average",
+            "Weekly volume is more than 15% above the 4-week average.",
+            value=round(float(estimate), 1),
+            limit=limit,
+            basis=basis,
+            hint="Compare this week with the non-recovery weeks before adding volume.",
+        )
     return None
 
 
@@ -651,12 +740,14 @@ def schedule_warnings(
     today: date,
     snapshot: dict[str, Any] | None,
     refresh_failed: bool,
-) -> tuple[list[str], list[dict[str, Any]]]:
-    """Return warnings and the sessions that are allowed to upload.
+) -> tuple[list[str], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return warning strings, allowed sessions, and structured warning details.
 
     The only hard block is a session on an unavailable weekday.
+    ``warnings`` stays a list of messages. ``warning_details`` carries value,
+    limit, and basis beside each message.
     """
-    warnings: list[str] = []
+    details: list[dict[str, Any]] = []
     allowed: list[dict[str, Any]] = []
     constraints = season.get("constraints") or {}
     unavailable = {day.upper() for day in constraints.get("unavailable_weekdays") or []}
@@ -671,8 +762,13 @@ def schedule_warnings(
         day = _parse_date(session["date"])
         weekday = list(WEEKDAYS.keys())[day.weekday()]
         if weekday in unavailable:
-            warnings.append(
-                f"Blocked {session['name']} on {session['date']}: unavailable weekday."
+            details.append(
+                warning_detail(
+                    "unavailable_weekday",
+                    f"Blocked {session['name']} on {session['date']}: unavailable weekday.",
+                    basis="season constraints.unavailable_weekdays",
+                    hint="Move the session off that weekday.",
+                )
             )
             continue
         allowed.append(session)
@@ -683,21 +779,47 @@ def schedule_warnings(
         }
         matched = next((name for name in identifiers if name and name in later_names), None)
         if matched:
-            warnings.append(
-                f"{session['name']} is only in a later phase ({matched})."
+            details.append(
+                warning_detail(
+                    "later_phase_session",
+                    f"{session['name']} is only in a later phase ({matched}).",
+                    basis="session name against later-phase key sessions",
+                    hint="Drop it or wait for that phase.",
+                )
             )
         if session.get("intent") == "hard" and active and active.get("date"):
             goal_day = _parse_date(active["date"])
             priority = str(active.get("priority") or "")
             if priority in {"A", "B"} and abs((goal_day - day).days) <= 7:
-                warnings.append(
-                    f"Hard session {session['name']} is within 7 days of an A or B goal."
+                details.append(
+                    warning_detail(
+                        "hard_near_goal",
+                        f"Hard session {session['name']} is within 7 days of an A or B goal.",
+                        value=abs((goal_day - day).days),
+                        limit=7,
+                        basis="days between the session and an A or B goal",
+                        hint="Move the hard session outside that week.",
+                    )
                 )
 
     if _build_or_peak(phase) and not any(session.get("intent") == "long" for session in allowed):
-        warnings.append("Build or peak week has no session with intent long.")
+        details.append(
+            warning_detail(
+                "missing_long",
+                "Build or peak week has no session with intent long.",
+                basis="session intent on the week being scheduled",
+                hint="Add one session with intent long.",
+            )
+        )
     if _recovery_or_taper(phase) and any(session.get("intent") == "hard" for session in allowed):
-        warnings.append("Hard work in a recovery or taper phase.")
+        details.append(
+            warning_detail(
+                "hard_in_recovery",
+                "Hard work in a recovery or taper phase.",
+                basis="session intent against the phase name",
+                hint="Keep this phase easy.",
+            )
+        )
     if hard_pct is not None and allowed:
         hard_minutes = sum(
             float(session.get("minutes") or 0)
@@ -705,13 +827,29 @@ def schedule_warnings(
             if session.get("intent") == "hard"
         )
         total_minutes = sum(float(session.get("minutes") or 0) for session in allowed)
-        if total_minutes > 0 and (100.0 * hard_minutes / total_minutes) > float(hard_pct):
-            warnings.append(f"Phase hard_pct {hard_pct} is exceeded.")
+        if total_minutes > 0:
+            share = round(100.0 * hard_minutes / total_minutes, 1)
+            if share > float(hard_pct):
+                details.append(
+                    warning_detail(
+                        "hard_pct_exceeded",
+                        f"Phase hard_pct {hard_pct} is exceeded.",
+                        value=share,
+                        limit=float(hard_pct),
+                        basis="share of session minutes whose intent is hard",
+                        hint="Shorten the hard session or move those minutes out of this week.",
+                    )
+                )
     estimate = week_km_estimate(allowed)
-    volume = volume_warning(estimate, snapshot, refresh_failed=refresh_failed)
+    volume = volume_warning_detail(
+        estimate,
+        snapshot,
+        refresh_failed=refresh_failed,
+        season=season,
+    )
     if volume:
-        warnings.append(volume)
-    return warnings, allowed
+        details.append(volume)
+    return [item["message"] for item in details], allowed, details
 
 
 def week_plan(season: dict[str, Any], week_start: str) -> dict[str, Any]:
@@ -1039,6 +1177,91 @@ def load_context_from_brief(brief: dict[str, Any] | None, *, hard_pct: Any) -> d
     return context
 
 
+def status_warning_details(
+    season: dict[str, Any],
+    today: date,
+    snapshot: dict[str, Any] | None,
+    *,
+    refresh_failed: bool,
+    events: list[dict[str, Any]] | None = None,
+    sessions: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    details: list[dict[str, Any]] = []
+    phase = current_phase(season, today)
+    band = band_for_week(season, today)
+    if band.get("missing_week_band"):
+        details.append(
+            warning_detail(
+                "missing_week_band",
+                "missing_week_band",
+                basis="the current phase has no weekly_km",
+                hint="Set weekly_km on the phase or a week_of override.",
+            )
+        )
+    where = where_we_are(season, today)
+    if where.get("active_goal_date_passed"):
+        details.append(
+            warning_detail(
+                "active_goal_date_passed",
+                "active_goal_date_passed",
+                basis="active goal date compared with today",
+                hint="Point active_goal_id at the next goal.",
+            )
+        )
+    event_rows = events
+    if event_rows is None and snapshot:
+        event_rows = snapshot.get("events") or []
+    mismatch = garmin_date_mismatch(season, event_rows or [])
+    if mismatch:
+        details.append(
+            warning_detail(
+                "garmin_date_mismatch",
+                mismatch,
+                basis="Garmin event date against the season goal date",
+                hint="Move the Garmin event onto the season date.",
+            )
+        )
+    active = goal_by_id(season, season.get("active_goal_id"))
+    longest = None if not snapshot else snapshot.get("longest_run_last_28_days_km")
+    floor = longest_run_warning(active, longest)
+    if floor:
+        details.append(
+            warning_detail(
+                "longest_run_floor",
+                floor,
+                value=longest,
+                limit=(active or {}).get("min_longest_run_km"),
+                basis="longest run in the last 28 days against the goal floor",
+                hint="Schedule a longer run before the goal.",
+            )
+        )
+    estimate = week_km_estimate(sessions or [])
+    volume = volume_warning_detail(
+        estimate, snapshot, refresh_failed=refresh_failed, season=season
+    )
+    if volume:
+        details.append(volume)
+    if phase is None and _phases(season):
+        details.append(
+            warning_detail(
+                "no_current_phase",
+                "no_current_phase",
+                basis="today is outside every phase",
+                hint="Extend the phase dates to cover today.",
+            )
+        )
+    for message in attempt_window_warnings(season):
+        details.append(
+            warning_detail(
+                "no_attempt_window",
+                message,
+                basis="goal date inside a no-attempt window",
+                hint="Move the goal date or the window.",
+            )
+        )
+    return details
+
+
 def status_warnings(
     season: dict[str, Any],
     today: date,
@@ -1048,30 +1271,14 @@ def status_warnings(
     events: list[dict[str, Any]] | None = None,
     sessions: list[dict[str, Any]] | None = None,
 ) -> list[str]:
-    warnings: list[str] = []
-    phase = current_phase(season, today)
-    band = band_for_week(season, today)
-    if band.get("missing_week_band"):
-        warnings.append("missing_week_band")
-    where = where_we_are(season, today)
-    if where.get("active_goal_date_passed"):
-        warnings.append("active_goal_date_passed")
-    event_rows = events
-    if event_rows is None and snapshot:
-        event_rows = snapshot.get("events") or []
-    mismatch = garmin_date_mismatch(season, event_rows or [])
-    if mismatch:
-        warnings.append(mismatch)
-    active = goal_by_id(season, season.get("active_goal_id"))
-    longest = None if not snapshot else snapshot.get("longest_run_last_28_days_km")
-    floor = longest_run_warning(active, longest)
-    if floor:
-        warnings.append(floor)
-    estimate = week_km_estimate(sessions or [])
-    volume = volume_warning(estimate, snapshot, refresh_failed=refresh_failed)
-    if volume:
-        warnings.append(volume)
-    if phase is None and _phases(season):
-        warnings.append("no_current_phase")
-    warnings.extend(attempt_window_warnings(season))
-    return warnings
+    return [
+        item["message"]
+        for item in status_warning_details(
+            season,
+            today,
+            snapshot,
+            refresh_failed=refresh_failed,
+            events=events,
+            sessions=sessions,
+        )
+    ]

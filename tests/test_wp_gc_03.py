@@ -21,6 +21,7 @@ from season_plan import (
     export_sessions,
     promote_last_race,
     resolve_sessions,
+    schedule_warnings,
     status_warnings,
     volume_warning,
     what_you_can_do,
@@ -378,6 +379,84 @@ def test_volume_warning_rules() -> None:
     assert volume_warning(20, bad_zero, refresh_failed=False) is None
     empty = {"as_of": "2026-10-28T07:40:00+01:00", "last_4_week_avg_run_km": 0, "runs_present": False}
     assert volume_warning(20, empty, refresh_failed=False) is None
+
+
+def test_warning_carries_value_limit_and_basis() -> None:
+    season = example_season()
+    season["phases"].insert(
+        0,
+        {
+            "name": "recovery",
+            "start": "2026-10-12",
+            "end": "2026-10-25",
+            "weekly_km": [10, 20],
+            "hard_pct": 0,
+            "template": [],
+        },
+    )
+    messages, _allowed, details = schedule_warnings(
+        season,
+        [
+            {
+                "date": "2026-11-10",
+                "name": "Hills",
+                "intent": "hard",
+                "type": "intervals",
+                "minutes": 40,
+            }
+        ],
+        today=date(2026, 11, 10),
+        snapshot=None,
+        refresh_failed=False,
+    )
+    hard = next(item for item in details if item["code"] == "hard_pct_exceeded")
+    assert hard["message"] in messages
+    assert hard["value"] == 100
+    assert hard["limit"] == 10
+    assert "intent is hard" in hard["basis"]
+    assert hard["hint"]
+
+    snapshot = {
+        "as_of": "2026-11-10T08:00:00+01:00",
+        "last_4_week_avg_run_km": 24.5,
+        "runs_present": True,
+        "run_km_by_week": {
+            "2026-10-05": 40,
+            "2026-10-12": 10,
+            "2026-10-19": 8,
+            "2026-10-26": 8,
+        },
+    }
+    # 10 and 8 km weeks are recovery or return. Leaving them in makes 30 km look
+    # like a spike. Excluding them leaves the 40 km week, so 30 km does not warn.
+    assert volume_warning(
+        30, snapshot, refresh_failed=False, season=season, today=date(2026, 11, 10)
+    ) is None
+    warned = volume_warning(
+        50, snapshot, refresh_failed=False, season=season, today=date(2026, 11, 10)
+    )
+    assert warned
+    _messages, _allowed, volume_details = schedule_warnings(
+        season,
+        [
+            {
+                "date": "2026-11-10",
+                "name": "Long",
+                "intent": "long",
+                "type": "long",
+                "minutes": 200,
+                "distance_km_estimate": 50,
+            }
+        ],
+        today=date(2026, 11, 10),
+        snapshot=snapshot,
+        refresh_failed=False,
+    )
+    volume = next(item for item in volume_details if item["code"] == "volume_above_average")
+    assert volume["value"] == 50
+    assert volume["limit"] == 46
+    assert "excluded" in volume["basis"]
+    assert volume["hint"]
 
 
 def test_actuals_window_includes_today_and_race_distance() -> None:
