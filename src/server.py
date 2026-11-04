@@ -1398,8 +1398,10 @@ def create_workout(
     ``sport`` is ``running`` (default) or ``gravel``. Gravel is uploaded as a
     Garmin cycling workout. Any other value returns unsupported_sport.
 
-    End is time (minutes) or distance (meters). Target is hr_zone (1–5), pace
-    (m/s low and high), or none. Repeat is iterations plus child steps, one
+    End is time (minutes) or distance (meters). Target is hr_zone (1–5),
+    hr_range (min_bpm and max_bpm), pace (m/s low and high), or none. A
+    distance step may use hr_zone, hr_range, or none; a pace target still
+    needs pace. Repeat is iterations plus child steps, one
     level. Legacy duration_minutes / distance_meters / heart_rate_zone /
     speed_mps fields still normalize for this release. Unknown keys error.
     ``sport`` is ``running`` (default) or ``gravel``. Anything else returns

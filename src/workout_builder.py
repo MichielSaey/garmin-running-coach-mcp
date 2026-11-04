@@ -15,7 +15,8 @@ from garminconnect.workout import (
     create_repeat_group,
 )
 
-from hr_zones import heart_rate_zone_target, zone_for_workout_type
+from hr_zones import heart_rate_range_target, heart_rate_zone_target, zone_for_workout_type
+from step_schema import PACE_DISTANCE_ERROR
 
 StepNode = Union[Dict[str, Any], Any]
 VALID_STEP_TYPES = {"warmup", "interval", "recovery", "cooldown"}
@@ -219,11 +220,17 @@ def _build_executable_step(
         meters = float(distance_meters)
         if meters <= 0:
             raise ValueError("distance_meters must be positive.")
-        if _pace_midpoint_mps(step) is None:
-            raise ValueError(
-                "distance_meters steps require a speed target "
-                "(target='speed' with speed_mps_min / speed_mps_max)."
-            )
+        explicit_hr = step.get("heart_rate_zone") is not None
+        target_block = step.get("target")
+        target_kind = target_block.get("type") if isinstance(target_block, dict) else None
+        target_label = str(target_block or "").lower() if isinstance(target_block, str) else ""
+        distance_without_pace = (
+            explicit_hr
+            or target_kind in {"hr_zone", "hr_range", "none"}
+            or target_label == "none"
+        )
+        if _pace_midpoint_mps(step) is None and not distance_without_pace:
+            raise ValueError(PACE_DISTANCE_ERROR)
         end_condition = _distance_end_condition()
         end_value = meters
     else:
@@ -231,6 +238,20 @@ def _build_executable_step(
         end_value = _minutes_to_seconds(float(duration_minutes))
 
     target_label = step.get("target")
+    if isinstance(target_label, dict) and target_label.get("type") == "hr_range":
+        low = int(target_label["min_bpm"])
+        high = int(target_label["max_bpm"])
+        if low <= 0 or high <= 0 or high < low:
+            raise ValueError("hr_range needs min_bpm and max_bpm, with max_bpm >= min_bpm.")
+        return ExecutableStep(
+            **common,
+            endCondition=end_condition,
+            endConditionValue=end_value,
+            targetType=heart_rate_range_target(),
+            targetValueOne=float(low),
+            targetValueTwo=float(high),
+        )
+
     if isinstance(target_label, str) and target_label.lower() == "none":
         return ExecutableStep(
             **common,
@@ -322,8 +343,13 @@ def _executable_step_seconds(data: Dict[str, Any]) -> float:
     condition_key = condition.get("conditionTypeKey") or ""
     value = float(data.get("endConditionValue") or 0)
     if condition_key == "distance":
-        speed_one = data.get("targetValueOne")
-        speed_two = data.get("targetValueTwo")
+        target_key = str((data.get("targetType") or {}).get("workoutTargetTypeKey") or "")
+        if "heart.rate" in target_key and data.get("zoneNumber") is None:
+            speed_one = None
+            speed_two = None
+        else:
+            speed_one = data.get("targetValueOne")
+            speed_two = data.get("targetValueTwo")
         speeds = [float(s) for s in (speed_one, speed_two) if s is not None]
         if speeds:
             mid = sum(speeds) / len(speeds)

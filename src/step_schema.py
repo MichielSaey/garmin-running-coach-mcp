@@ -10,6 +10,13 @@ from hr_zones import zone_for_workout_type
 
 _STEP_TYPES = {"warmup", "interval", "recovery", "cooldown"}
 
+PACE_DISTANCE_ERROR = (
+    "Parameter estimated_pace_mps (or target mps_low and mps_high) is required "
+    "when a distance step uses a pace target. "
+    'Example: {"type": "interval", "end": {"type": "distance", "meters": 1000}, '
+    '"target": {"type": "pace", "mps_low": 3.0, "mps_high": 3.3}}.'
+)
+
 
 class EndTime(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -27,6 +34,13 @@ class TargetHr(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: str
     zone: int = Field(ge=1, le=5)
+
+
+class TargetHrRange(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    type: str
+    min_bpm: int = Field(ge=1)
+    max_bpm: int = Field(ge=1)
 
 
 class TargetPace(BaseModel):
@@ -47,7 +61,7 @@ class StepInput(BaseModel):
     model_config = ConfigDict(extra="forbid")
     type: str
     end: Optional[Union[EndTime, EndDistance]] = None
-    target: Optional[Union[TargetHr, TargetPace, TargetNone, str]] = None
+    target: Optional[Union[TargetHr, TargetHrRange, TargetPace, TargetNone, str]] = None
     estimated_pace_mps: Optional[float] = None
     duration_minutes: Optional[float] = None
     distance_meters: Optional[float] = None
@@ -116,12 +130,14 @@ def _normalize_one(raw: dict[str, Any], *, nested: bool) -> dict[str, Any]:
     if parsed.estimated_pace_mps is not None:
         canonical["estimated_pace_mps"] = float(parsed.estimated_pace_mps)
 
-    if end["type"] == "distance":
-        has_pace = target["type"] == "pace" or parsed.estimated_pace_mps is not None
-        if not has_pace:
-            raise ValueError(
-                "Distance steps require a pace target or estimated_pace_mps."
-            )
+    if end["type"] == "distance" and target["type"] == "pace":
+        if parsed.estimated_pace_mps is None and (
+            target.get("mps_low") is None or target.get("mps_high") is None
+        ):
+            raise ValueError(PACE_DISTANCE_ERROR)
+    elif end["type"] == "distance" and target["type"] not in {"hr_zone", "none", "hr_range"}:
+        if parsed.estimated_pace_mps is None:
+            raise ValueError(PACE_DISTANCE_ERROR)
     return canonical
 
 
@@ -166,6 +182,14 @@ def _resolve_target(parsed: StepInput) -> dict[str, Any]:
             if zone < 1 or zone > 5:
                 raise ValueError("Heart rate zone must be 1-5.")
             return {"type": "hr_zone", "zone": zone}
+        if kind == "hr_range":
+            low = int(explicit["min_bpm"])
+            high = int(explicit["max_bpm"])
+            if low <= 0 or high <= 0:
+                raise ValueError("hr_range bpm must be positive.")
+            if high < low:
+                raise ValueError("max_bpm must be >= min_bpm.")
+            return {"type": "hr_range", "min_bpm": low, "max_bpm": high}
         if kind == "pace":
             low = float(explicit["mps_low"])
             high = float(explicit["mps_high"])
@@ -176,7 +200,7 @@ def _resolve_target(parsed: StepInput) -> dict[str, Any]:
             return {"type": "pace", "mps_low": low, "mps_high": high}
         if kind == "none":
             return {"type": "none"}
-        raise ValueError("target.type must be hr_zone, pace, or none.")
+        raise ValueError("target.type must be hr_zone, hr_range, pace, or none.")
     if isinstance(explicit, str):
         label = explicit.lower()
         if label in {"speed", "pace"}:
@@ -260,6 +284,12 @@ def canonical_to_builder(steps: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 out["estimated_duration_minutes"] = float(end["meters"]) / float(pace) / 60.0
         if target["type"] == "hr_zone":
             out["heart_rate_zone"] = target["zone"]
+        elif target["type"] == "hr_range":
+            out["target"] = {
+                "type": "hr_range",
+                "min_bpm": target["min_bpm"],
+                "max_bpm": target["max_bpm"],
+            }
         elif target["type"] == "none":
             out["target"] = "none"
         elif target["type"] == "pace" and end["type"] == "time":

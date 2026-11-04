@@ -177,6 +177,48 @@ def test_sport_defaults_to_running_and_gravel_is_cycling() -> None:
     assert type(gravel).__name__ == "CyclingWorkout"
 
 
+def test_distance_hr_range_builds_and_echoes_the_bounds(plan_db) -> None:
+    del plan_db
+    steps = [
+        {
+            "type": "interval",
+            "end": {"type": "distance", "meters": 17_000},
+            "target": {"type": "hr_range", "min_bpm": 135, "max_bpm": 150},
+        }
+    ]
+    canonical = normalize_steps(steps)
+    assert canonical[0]["target"] == {"type": "hr_range", "min_bpm": 135, "max_bpm": 150}
+    mock_client = MagicMock()
+    mock_client.upload_cycling_workout.return_value = {"workoutId": 77}
+    with (
+        patch.object(server, "_get_client_or_error", return_value=(mock_client, None)),
+        patch.object(server, "get_profile", return_value={}),
+        patch.object(server, "resolve_hr_context", return_value={"zones": []}),
+    ):
+        result = server.create_workout("Gravel spin", steps, sport="gravel")
+    assert result.get("error") is None
+    assert result["resolved_steps"][0]["target"] == {
+        "type": "hr_range",
+        "min_bpm": 135,
+        "max_bpm": 150,
+    }
+    workout = mock_client.upload_cycling_workout.call_args.args[0]
+    built = workout.workoutSegments[0].workoutSteps[0]
+    assert built.endConditionValue == 17000
+    assert built.targetValueOne == 135
+    assert built.targetValueTwo == 150
+    zoned = normalize_steps(
+        [
+            {
+                "type": "interval",
+                "end": {"type": "distance", "meters": 1000},
+                "target": {"type": "hr_zone", "zone": 2},
+            }
+        ]
+    )
+    assert zoned[0]["target"]["type"] == "hr_zone"
+
+
 def test_create_workout_echoes_resolved_steps(plan_db) -> None:
     del plan_db
     mock_client = MagicMock()

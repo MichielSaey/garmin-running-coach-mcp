@@ -136,5 +136,10 @@ def heart_rate_zone_target() -> Dict[str, Any]:
     }
 
 
+def heart_rate_range_target() -> Dict[str, Any]:
+    """Custom bpm bounds. Garmin stores them on the heart-rate zone target."""
+    return heart_rate_zone_target()
+
+
 def zone_for_workout_type(workout_type: str) -> int:
     return WORKOUT_ZONE_TARGETS.get(workout_type, 2)
