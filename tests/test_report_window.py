@@ -93,6 +93,28 @@ def test_get_report_includes_training_plan_and_window() -> None:
     assert result["window"]["end_date"] == anchor.isoformat()
     training_plan_table.assert_called_once()
     assert training_plan_table.call_args.kwargs["anchor_end"] == anchor
+    assert training_plan_table.call_args.kwargs["threshold_mps"] is None
+
+
+def test_get_report_passes_raw_threshold_mps() -> None:
+    anchor = date.today() - timedelta(days=1)
+
+    with (
+        patch.object(server, "_get_client_or_error", return_value=(MagicMock(), None)),
+        patch.object(
+            server,
+            "get_profile",
+            return_value={"weight": 70, "lactateThresholdSpeedMps": 3.2},
+        ),
+        patch.object(server, "get_race_predictions", return_value={}),
+        patch.object(server, "get_personal_records", return_value={"records": []}),
+        patch.object(server, "get_events", return_value={"Garmin Events": {"Rows": []}}),
+        patch.object(server, "_training_plan_table", return_value=([], [])) as table,
+    ):
+        server.get_report(days=7, days_ago=0)
+
+    assert table.call_args.kwargs["threshold_mps"] == 3.2
+    assert table.call_args.kwargs["anchor_end"] == anchor
 
 
 def test_get_report_window_matches_latest_week_block() -> None:

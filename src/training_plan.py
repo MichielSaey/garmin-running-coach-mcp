@@ -1,3 +1,4 @@
+import math
 from datetime import date, timedelta
 from statistics import median
 from typing import Any, Callable, Optional
@@ -53,13 +54,7 @@ WEEK_TYPE_SPECS = {
 
 OUTLIER_BAND = 0.50
 HOT_TEMP_C = 28.0
-
-RACE_PEAK_MINUTES = {
-    "5k": 240,
-    "10k": 300,
-    "half": 400,
-    "marathon": 520,
-}
+_KM_PER_MILE = 1.609344
 
 
 def weeks_until_event(from_date: date, event_date: date) -> int | None:
@@ -184,20 +179,92 @@ def first_event_date(event_rows: list[list[Any]], today: date | None = None) -> 
     return min(upcoming) if upcoming else None
 
 
-def first_event_title(
+def race_time_minutes(distance_km: float, threshold_mps: float) -> float:
+    """Minutes to cover ``distance_km`` at lactate-threshold speed.
+
+    ``threshold_mps`` is metres per second.
+    ``minutes = (distance_km * 1000) / threshold_mps / 60``.
+    """
+    try:
+        distance = float(distance_km)
+        speed = float(threshold_mps)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "distance_km and threshold_mps must be positive numbers"
+        ) from exc
+    if (
+        not math.isfinite(distance)
+        or not math.isfinite(speed)
+        or distance <= 0
+        or speed <= 0
+    ):
+        raise ValueError("distance_km and threshold_mps must be positive")
+    return (distance * 1000.0) / speed / 60.0
+
+
+def _distance_km_from_event_row(row: list[Any]) -> float | None:
+    """Kilometres from a Garmin event row, or None when it is not a distance."""
+    if len(row) < 6:
+        return None
+    unit_type = row[5]
+    if not isinstance(unit_type, str) or unit_type.strip().lower() != "distance":
+        return None
+    unit = row[4]
+    if not isinstance(unit, str):
+        return None
+    try:
+        value = float(row[3])
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(value) or value <= 0:
+        return None
+    key = unit.strip().lower()
+    if key in ("meter", "m"):
+        return value / 1000.0
+    if key == "km":
+        return value
+    if key in ("mile", "mi"):
+        return value * _KM_PER_MILE
+    return None
+
+
+def upcoming_event_distance_km(
     event_rows: list[list[Any]], today: date | None = None
-) -> str | None:
-    """Title of the earliest upcoming event (for race peak heuristics)."""
+) -> float | None:
+    """Distance in km of the earliest upcoming event.
+
+    Duration targets, missing targets, and unknown units yield None.
+    The event title is never used.
+    """
     today = today or date.today()
-    best: tuple[date, str] | None = None
+    earliest: tuple[date, list[Any]] | None = None
     for row in event_rows:
         event_date = _event_date_from_row(row)
         if event_date is None or event_date <= today:
             continue
-        title = str(row[0]) if row else ""
-        if best is None or event_date < best[0]:
-            best = (event_date, title)
-    return best[1] if best else None
+        if earliest is None or event_date < earliest[0]:
+            earliest = (event_date, row)
+    if earliest is None:
+        return None
+    return _distance_km_from_event_row(earliest[1])
+
+
+def _race_time_payload(
+    distance_km: float | None, threshold_mps: float | None
+) -> dict[str, float] | None:
+    if distance_km is None or threshold_mps is None:
+        return None
+    try:
+        distance = float(distance_km)
+        speed = float(threshold_mps)
+        minutes = race_time_minutes(distance, speed)
+    except (TypeError, ValueError):
+        return None
+    return {
+        "distance_km": distance,
+        "threshold_mps": speed,
+        "minutes": minutes,
+    }
 
 
 def last_event_date_from_payload(events: dict[str, Any]) -> date | None:
@@ -213,26 +280,6 @@ def last_event_date_from_payload(events: dict[str, Any]) -> date | None:
 
 def round_minutes(value: float | None) -> int | None:
     return round(value) if value is not None else None
-
-
-def goal_peak_minutes_from_title(
-    title: str | None,
-    chronic_min: float | None,
-    peak_min: float,
-) -> float:
-    """Map event title heuristics to a goal peak weekly minutes value."""
-    text = (title or "").lower()
-    # Check half before marathon so "Half Marathon" does not map to full.
-    if "half" in text or "21.1" in text or "21k" in text:
-        return float(RACE_PEAK_MINUTES["half"])
-    if "marathon" in text or "42" in text:
-        return float(RACE_PEAK_MINUTES["marathon"])
-    if "10k" in text or "10 k" in text:
-        return float(RACE_PEAK_MINUTES["10k"])
-    if "5k" in text or "5 k" in text:
-        return float(RACE_PEAK_MINUTES["5k"])
-    base = chronic_min if chronic_min is not None else 0.0
-    return float(max(base, peak_min))
 
 
 def chronic_minutes_from_rows(
@@ -580,7 +627,9 @@ def build_training_plan(
     daily_weather: Optional[dict[str, dict[str, Any]]] = None,
     last_event_date: date | None = None,
     today: date | None = None,
-    event_title: str | None = None,
+    *,
+    distance_km: float | None = None,
+    threshold_mps: float | None = None,
 ) -> list[dict[str, Any]]:
     if not stat_rows:
         return []
@@ -614,7 +663,6 @@ def build_training_plan(
     )
 
     chronic_min, outliers = chronic_minutes_from_rows(stat_rows)
-    goal_peak = goal_peak_minutes_from_title(event_title, chronic_min, peak_min)
 
     training_plan: list[dict[str, Any]] = []
 
@@ -624,21 +672,12 @@ def build_training_plan(
         week_type = week_types[i]
         is_latest = i == len(stat_rows) - 1
         load = load_at_week_end(week_end)
-        weeks_until = (
-            weeks_until_event(week_end, event_date) if event_date else None
-        )
 
         block = {
             "week_description": "latest_week" if is_latest else "past_week",
             "week_type": week_type,
             "actuals": actuals_from_stat_row(row, load),
-            "target": build_target(
-                week_type,
-                chronic_min,
-                peak_min,
-                weeks_until=weeks_until,
-                goal_peak_min=goal_peak if event_date else None,
-            ),
+            "target": build_target(week_type, chronic_min, peak_min),
         }
         _enrich_week_weather(
             block, week_start, week_end, daily_weather, include_days=is_latest
@@ -659,24 +698,17 @@ def build_training_plan(
         schedule_recovery=True,
         today=today,
     )
-    weeks_until_upcoming = (
-        weeks_until_event(plan_end, event_date) if event_date else None
-    )
-
     upcoming_block: dict[str, Any] = {
         "week_description": "upcoming_week",
         "week_type": plan_type,
         "actuals": empty_actuals(),
-        "target": build_target(
-            plan_type,
-            chronic_min,
-            peak_min,
-            weeks_until=weeks_until_upcoming,
-            goal_peak_min=goal_peak if event_date else None,
-        ),
+        "target": build_target(plan_type, chronic_min, peak_min),
         "chronic_min": round(chronic_min, 2) if chronic_min is not None else None,
         "outlier_weeks_dropped": outliers,
     }
+    race_time = _race_time_payload(distance_km, threshold_mps)
+    if race_time is not None:
+        upcoming_block["race_time"] = race_time
     if daily_weather is not None:
         upcoming_block["avg_temp_c"] = average_temp(
             daily_weather, plan_start, plan_end

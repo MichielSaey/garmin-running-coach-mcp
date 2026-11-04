@@ -52,9 +52,9 @@ from rolling_week import anchor_end as compute_anchor_end, window_bounds
 from training_plan import (
     build_training_plan,
     first_event_date,
-    first_event_title,
     last_event_date_from_payload,
     latest_event_within_days,
+    upcoming_event_distance_km,
 )
 from training_status import parse_training_status
 from weather import fetch_daily_weather
@@ -591,6 +591,7 @@ def _training_plan_table(
     weeks: int = 4,
     *,
     anchor_end: Optional[date] = None,
+    threshold_mps: float | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]] | dict[str, Any]:
     stats = _weekly_stats_table(client, weeks=weeks, anchor_end=anchor_end)
     if isinstance(stats, dict) and stats.get("error"):
@@ -599,7 +600,6 @@ def _training_plan_table(
     activities = stats.pop("_activities", [])
     event_rows = events.get("Garmin Events", {}).get("Rows", [])
     upcoming_event_date = first_event_date(event_rows)
-    upcoming_event_title = first_event_title(event_rows)
     last_event_date = last_event_date_from_payload(events)
     stat_rows = stats["Garmin Weekly Stats"]["Rows"]
 
@@ -618,7 +618,8 @@ def _training_plan_table(
             load_at_week_end,
             daily_weather,
             last_event_date=last_event_date,
-            event_title=upcoming_event_title,
+            distance_km=upcoming_event_distance_km(event_rows),
+            threshold_mps=threshold_mps,
         ),
         activities,
     )
@@ -644,6 +645,19 @@ def _weather_for_plan(
     )
 
 
+def _lactate_threshold_speed_mps(raw: Any) -> float | None:
+    """Garmin ``userData.lactateThresholdSpeed`` in metres per second."""
+    if raw is None:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if value <= 0:
+        return None
+    return value
+
+
 @mcp.tool()
 def get_profile() -> Dict[str, Any]:
     client, error = _get_client_or_error()
@@ -663,6 +677,9 @@ def get_profile() -> Dict[str, Any]:
         "vo2MaxRunning": profile.get("vo2MaxRunning"),
         "lactateThresholdSpeed": round(
             (profile.get("lactateThresholdSpeed", 0) * 1000 / 60), 2
+        ),
+        "lactateThresholdSpeedMps": _lactate_threshold_speed_mps(
+            profile.get("lactateThresholdSpeed")
         ),
         "lactateThresholdHeartRate": profile.get("lactateThresholdHeartRate"),
         "availableTrainingDays": profile.get("availableTrainingDays", []),
@@ -755,7 +772,12 @@ def get_report(
     if isinstance(events, dict) and events.get("error"):
         return events
 
-    plan_result = _training_plan_table(client, events, anchor_end=anchor)
+    plan_result = _training_plan_table(
+        client,
+        events,
+        anchor_end=anchor,
+        threshold_mps=profile.get("lactateThresholdSpeedMps"),
+    )
     if isinstance(plan_result, dict) and plan_result.get("error"):
         return plan_result
 

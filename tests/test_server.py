@@ -521,6 +521,96 @@ def test_weekly_report_resource_for_days_clamps_and_forwards() -> None:
     get_report.assert_called_once_with(days=90, days_ago=0)
 
 
+def test_get_profile_publishes_raw_lactate_threshold_speed() -> None:
+    mock_client = MagicMock()
+    mock_client.get_user_profile.return_value = {
+        "userData": {
+            "weight": 70000,
+            "lactateThresholdSpeed": 3.5,
+            "lactateThresholdHeartRate": 168,
+        }
+    }
+
+    with patch.object(server, "_get_client_or_error", return_value=(mock_client, None)):
+        result = server.get_profile()
+
+    assert result["lactateThresholdSpeedMps"] == 3.5
+    assert result["lactateThresholdSpeed"] == round(3.5 * 1000 / 60, 2)
+    assert result["lactateThresholdHeartRate"] == 168
+
+
+def test_get_profile_threshold_mps_missing_or_non_positive() -> None:
+    mock_client = MagicMock()
+    mock_client.get_user_profile.return_value = {
+        "userData": {"weight": 70000, "lactateThresholdSpeed": 0}
+    }
+
+    with patch.object(server, "_get_client_or_error", return_value=(mock_client, None)):
+        zero = server.get_profile()
+
+    mock_client.get_user_profile.return_value = {"userData": {"weight": 70000}}
+    with patch.object(server, "_get_client_or_error", return_value=(mock_client, None)):
+        missing = server.get_profile()
+
+    assert zero["lactateThresholdSpeedMps"] is None
+    assert zero["lactateThresholdSpeed"] == round(0 * 1000 / 60, 2)
+    assert missing["lactateThresholdSpeedMps"] is None
+    assert missing["lactateThresholdSpeed"] == round(0 * 1000 / 60, 2)
+
+
+def test_training_plan_table_uses_event_distance_and_threshold() -> None:
+    stats = {
+        "Garmin Weekly Stats": {
+            "Rows": [
+                [
+                    "2026-05-26",
+                    "2026-06-01",
+                    40.0,
+                    300,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    80.0,
+                    0.0,
+                    20.0,
+                    15.0,
+                    5.0,
+                ]
+            ]
+        },
+        "_activities": [{"activityId": 1}],
+    }
+    events = {
+        "Garmin Events": {
+            "Rows": [
+                ["City 5k", "event", "2027-06-01", 15000, "meter", "distance", 9],
+            ]
+        },
+        "latest_event": None,
+    }
+
+    with (
+        patch.object(server, "_weekly_stats_table", return_value=stats),
+        patch.object(server, "_weather_for_plan", return_value=None),
+    ):
+        plan, activities = server._training_plan_table(
+            MagicMock(),
+            events,
+            threshold_mps=10 / 3,
+        )
+
+    assert activities == [{"activityId": 1}]
+    race = plan[-1]["race_time"]
+    assert race["distance_km"] == 15
+    assert race["threshold_mps"] == 10 / 3
+    assert abs(race["minutes"] - 75.0) < 0.05
+
+
 def test_get_profile_handles_missing_user_profile() -> None:
     mock_client = MagicMock()
     del mock_client.get_user_profile

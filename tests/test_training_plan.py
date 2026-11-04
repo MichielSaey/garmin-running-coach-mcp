@@ -1,5 +1,7 @@
 from datetime import date
 
+import pytest
+
 from training_plan import (
     WEEK_TYPE_SPECS,
     build_target,
@@ -9,9 +11,10 @@ from training_plan import (
     classify_plan_week,
     classify_week_type,
     first_event_date,
-    goal_peak_minutes_from_title,
     latest_event_within_days,
+    race_time_minutes,
     split_week_sessions,
+    upcoming_event_distance_km,
     weeks_until_event,
 )
 from training_status import parse_training_status
@@ -163,8 +166,111 @@ def test_calc_volume_target_build_and_recovery() -> None:
     assert calc_volume_target("recovery", 300.0, 320.0) == 240
 
 
-def test_goal_peak_from_half_title() -> None:
-    assert goal_peak_minutes_from_title("City Half Marathon", 300.0, 320.0) == 400
+def test_race_time_minutes_ten_km_at_threshold_speed() -> None:
+    assert abs(race_time_minutes(10.0, 10 / 3) - 50.0) < 0.05
+
+
+def test_race_time_minutes_rejects_non_positive() -> None:
+    with pytest.raises(ValueError):
+        race_time_minutes(0, 3.0)
+    with pytest.raises(ValueError):
+        race_time_minutes(10, -1)
+    with pytest.raises(ValueError):
+        race_time_minutes(-5, 3.0)
+
+
+def _upcoming_plan(
+    event_rows: list | None = None,
+    *,
+    distance_km: float | None = None,
+    threshold_mps: float | None = None,
+    today: date | None = None,
+) -> list:
+    today = today or date(2026, 6, 1)
+    if event_rows is not None:
+        distance_km = upcoming_event_distance_km(event_rows, today=today)
+    stat_rows = [
+        _stat_row("2026-05-26", "2026-06-01", 40.0, total_zone_min=300),
+    ]
+    return build_training_plan(
+        stat_rows,
+        event_date=date(2026, 8, 1),
+        load_at_week_end=lambda _e: {},
+        today=today,
+        distance_km=distance_km,
+        threshold_mps=threshold_mps,
+    )
+
+
+def test_title_without_distance_omits_race_time() -> None:
+    plan = _upcoming_plan(
+        [["Trail 25k", "event", "2026-08-01", None, None, None]],
+        threshold_mps=10 / 3,
+    )
+    assert "race_time" not in plan[-1]
+    assert plan[-1]["target"]["target_min"] == 345
+
+
+def test_distance_target_ignores_shorter_distance_in_title() -> None:
+    plan = _upcoming_plan(
+        [["City 5k", "event", "2026-08-01", 15, "km", "distance"]],
+        threshold_mps=10 / 3,
+    )
+    race = plan[-1]["race_time"]
+    assert race["distance_km"] == 15
+    assert race["threshold_mps"] == 10 / 3
+    assert abs(race["minutes"] - 75.0) < 0.05
+    assert "race_time" not in plan[0]
+    # Weekly volume stays chronic × build multiplier (300 × 1.15).
+    assert plan[-1]["target"]["target_min"] == 345
+
+
+def test_missing_threshold_speed_omits_race_time() -> None:
+    plan = _upcoming_plan(distance_km=15.0, threshold_mps=None)
+    assert "race_time" not in plan[-1]
+
+
+def test_duration_only_event_omits_race_time() -> None:
+    today = date(2026, 6, 1)
+    for value, unit in ((2, "hour"), (7200, "second")):
+        rows = [["Timed event", "event", "2026-08-01", value, unit, "duration"]]
+        assert upcoming_event_distance_km(rows, today=today) is None
+    plan = _upcoming_plan(
+        [["Timed event", "event", "2026-08-01", 2, "hour", "duration"]],
+        threshold_mps=3.5,
+    )
+    assert "race_time" not in plan[-1]
+
+
+def test_race_time_does_not_change_weekly_minutes() -> None:
+    # 42.195 km at 2 m/s is ~352 min. That must not feed goal_peak_min.
+    plan = _upcoming_plan(distance_km=42.195, threshold_mps=2.0)
+    assert plan[-1]["race_time"]["minutes"] > 300
+    assert plan[-1]["target"]["target_min"] == 345
+
+
+def test_upcoming_event_distance_converts_units() -> None:
+    today = date(2026, 6, 1)
+    assert (
+        upcoming_event_distance_km(
+            [["A", "event", "2026-08-01", 10000, "meter", "distance"]],
+            today=today,
+        )
+        == 10
+    )
+    assert (
+        upcoming_event_distance_km(
+            [["A", "event", "2026-08-01", 5000, "m", "distance"]],
+            today=today,
+        )
+        == 5
+    )
+    miles = upcoming_event_distance_km(
+        [["A", "event", "2026-08-01", 1, "mi", "distance"]],
+        today=today,
+    )
+    assert miles is not None
+    assert abs(miles - 1.609344) < 1e-9
 
 
 def test_race_curve_caps_at_build_ratio() -> None:
