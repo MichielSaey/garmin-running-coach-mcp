@@ -172,6 +172,25 @@ def scheduled_workouts_between(
     return rows
 
 
+def find_scheduled_by_id(
+    client: Any,
+    call_optional: CallOptional,
+    schedule_id: int,
+    *,
+    around: date,
+) -> dict[str, Any] | None:
+    """The calendar workout whose schedule id is ``schedule_id``."""
+    start = around - timedelta(days=120)
+    end = around + timedelta(days=220)
+    wanted = int(schedule_id)
+    for item in calendar_items(client, call_optional, start, end):
+        if not is_workout_item(item):
+            continue
+        if schedule_id_from_item(item) == wanted:
+            return item
+    return None
+
+
 def events_between(
     client: Any,
     call_optional: CallOptional,

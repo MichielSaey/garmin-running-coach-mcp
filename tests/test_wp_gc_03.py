@@ -650,6 +650,57 @@ def test_delete_scheduled_workout_forgets_the_idempotency_row(plan_db) -> None:
     )
 
 
+def test_delete_scheduled_workout_names_the_row_and_expect_name_blocks(plan_db) -> None:
+    del plan_db
+    items = {
+        (2026, 11): [
+            {
+                "itemType": "workout",
+                "date": "2026-11-11",
+                "title": "Wed Vert",
+                "workoutId": 55,
+                "id": 1829382547,
+            },
+            {
+                "itemType": "workout",
+                "date": "2026-11-05",
+                "title": "Thu commute",
+                "workoutId": 56,
+                "id": 99,
+            },
+        ]
+    }
+    client = _october_client(items)
+    with patch.object(server, "_get_client_or_error", return_value=(client, None)):
+        blocked = server.delete_scheduled_workout(
+            schedule_id=1829382547,
+            workout_id=56,
+            workout_date="2026-11-05",
+            expect_name="Thu commute",
+        )
+    assert blocked["ok"] is False
+    assert "error" in blocked
+    assert blocked["schedule_id"] == 1829382547
+    assert blocked["workout_id"] == 55
+    assert blocked["name"] == "Wed Vert"
+    assert blocked["date"] == "2026-11-11"
+    client.unschedule_workout.assert_not_called()
+
+    with patch.object(server, "_get_client_or_error", return_value=(client, None)):
+        deleted = server.delete_scheduled_workout(
+            schedule_id=1829382547,
+            expect_name="Wed Vert",
+        )
+    assert deleted == {
+        "ok": True,
+        "schedule_id": 1829382547,
+        "workout_id": 55,
+        "name": "Wed Vert",
+        "date": "2026-11-11",
+    }
+    client.unschedule_workout.assert_called_once_with(1829382547)
+
+
 def test_failed_schedule_retries_without_a_second_upload(plan_db) -> None:
     del plan_db
     season = example_season()

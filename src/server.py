@@ -12,11 +12,15 @@ from garminconnect import (
 from mcp.server.fastmcp import FastMCP
 
 from calendar_events import add_event as create_calendar_event
+from calendar_events import find_scheduled_by_id
 from calendar_events import get_event as read_calendar_event
+from calendar_events import item_date as calendar_item_day
+from calendar_events import item_name as calendar_item_name
 from calendar_events import remove_event as delete_calendar_event
 from calendar_events import schedule_id_from_item
 from calendar_events import scheduled_workouts_between
 from calendar_events import update_event as patch_calendar_event
+from calendar_events import workout_id_from_item as calendar_workout_id
 from coaching import (
     actuals_are_fresh,
     build_coaching_overview,
@@ -1829,38 +1833,104 @@ def list_scheduled_workouts(start: str, end: str) -> Any:
 
 
 @mcp.tool()
+def _scheduled_row_echo(
+    item: Optional[Dict[str, Any]],
+    *,
+    schedule_id: Optional[int],
+    workout_id: Optional[int],
+    workout_date: Optional[str],
+) -> Dict[str, Any]:
+    if item is None:
+        return {
+            "schedule_id": int(schedule_id) if schedule_id is not None else None,
+            "workout_id": int(workout_id) if workout_id is not None else None,
+            "name": None,
+            "date": workout_date,
+        }
+    found_schedule = schedule_id_from_item(item)
+    found_workout = calendar_workout_id(item)
+    return {
+        "schedule_id": found_schedule if found_schedule is not None else schedule_id,
+        "workout_id": found_workout if found_workout is not None else workout_id,
+        "name": calendar_item_name(item),
+        "date": calendar_item_day(item) or workout_date,
+    }
+
+
 def delete_scheduled_workout(
     schedule_id: Optional[int] = None,
     workout_id: Optional[int] = None,
     workout_date: Optional[str] = None,
+    expect_name: Optional[str] = None,
 ) -> Dict[str, Any]:
-    """Remove a calendar workout by schedule id, or by workout id plus date.
+    """Remove a calendar workout and echo the row that was removed.
 
-    Does not delete the library workout. The caller may name a row this server
-    did not create.
+    Precedence: ``schedule_id`` wins; otherwise ``workout_id`` and
+    ``workout_date`` are both required. ``expect_name``, when set, must match
+    that row's name. A mismatch deletes nothing and returns the row that would
+    have been hit. Does not delete the library workout.
     """
     client, error = _get_client_or_error()
     if error:
         return error
-    resolved = schedule_id
-    if resolved is None:
+    item: Optional[Dict[str, Any]] = None
+    if schedule_id is not None:
+        anchor = date.today()
+        if workout_date:
+            try:
+                anchor = date.fromisoformat(workout_date)
+            except ValueError:
+                anchor = date.today()
+        item = find_scheduled_by_id(
+            client, _call_optional, int(schedule_id), around=anchor
+        )
+        resolved = int(schedule_id)
+    else:
         if workout_id is None or not workout_date:
             return {"error": "Pass schedule_id, or workout_id and workout_date."}
         item = _find_scheduled_workout(client, int(workout_id), workout_date)
         if item is None:
             return {"error": "No scheduled workout found for that id and date."}
-        resolved = schedule_id_from_item(item)
-        if resolved is None:
+        found = schedule_id_from_item(item)
+        if found is None:
             return {"error": "Scheduled workout has no schedule id."}
+        resolved = int(found)
+    row = _scheduled_row_echo(
+        item,
+        schedule_id=resolved,
+        workout_id=workout_id,
+        workout_date=workout_date,
+    )
+    if expect_name is not None and row.get("name") != expect_name:
+        return {
+            "ok": False,
+            "error": (
+                f"expect_name {expect_name!r} does not match "
+                f"{row.get('name')!r}."
+            ),
+            "schedule_id": row.get("schedule_id"),
+            "workout_id": row.get("workout_id"),
+            "name": row.get("name"),
+            "date": row.get("date"),
+        }
     result = _call_optional(client, "unschedule_workout", int(resolved))
     if isinstance(result, dict) and result.get("error"):
         return result
+    forget_id = row.get("workout_id")
+    if forget_id is None and workout_id is not None:
+        forget_id = int(workout_id)
     forget_schedule(
         schedule_id=int(resolved),
-        workout_id=int(workout_id) if workout_id is not None else None,
-        day=workout_date,
+        workout_id=int(forget_id) if forget_id is not None else None,
+        day=row.get("date") or workout_date,
     )
-    return {"ok": True, "schedule_id": int(resolved), "workout_id": workout_id}
+    return {
+        "ok": True,
+        "schedule_id": int(resolved),
+        "workout_id": row.get("workout_id"),
+        "name": row.get("name"),
+        "date": row.get("date"),
+    }
 
 
 @mcp.tool()
