@@ -3,6 +3,14 @@ from unittest.mock import MagicMock, patch
 import server
 
 
+def test_schedule_and_delete_are_registered_tools() -> None:
+    names = {tool.name for tool in server.mcp._tool_manager.list_tools()}
+    assert "schedule_workout" in names
+    assert "delete_scheduled_workout" in names
+    assert "_schedule_id_from_schedule_result" not in names
+    assert "_scheduled_row_echo" not in names
+
+
 def test_schedule_workout_skips_duplicate_calendar_entry() -> None:
     mock_client = MagicMock()
     mock_client.get_scheduled_workouts.return_value = {
