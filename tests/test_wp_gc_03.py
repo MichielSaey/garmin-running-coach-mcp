@@ -241,13 +241,70 @@ def test_week_override_wins_and_a_note_does_not(plan_db) -> None:
     status = server.get_plan_status()
     assert status["scaling"]["overridden"] is False
     assert status["scaling"]["override_reason"] is None
-    assert status["scaling"]["this_week_target_km"] == [10, 18]
+    assert status["scaling"]["this_week_target_km"] == band_for_week(
+        example_season(), date.today()
+    )["this_week_target_km"]
     rejected = server.update_season("2027", {"constraints": {}}, reason="")
     assert "reason" in rejected["error"]
     updated = server.update_season("2027", {"constraints": {"preferred_training_time": "evening"}}, reason="keep evenings")
     assert updated["ok"] is True
     assert any(note["text"] == "keep evenings" for note in server.get_plan_status()["recent_notes"])
     assert server.get_plan_status()["scaling"]["overridden"] is False
+
+
+def test_week_start_is_rejected_and_week_of_changes_this_week_target(plan_db) -> None:
+    del plan_db
+    server.set_season(example_season())
+    rejected = server.update_season(
+        "2027",
+        {"week_overrides": [{"week_start": "2026-11-09", "weekly_km": [25, 30]}]},
+        reason="guessed the key",
+    )
+    assert "week_start" in rejected["error"]
+    assert "invalid" in rejected["error"]
+    not_monday = server.update_season(
+        "2027",
+        {"week_overrides": [{"week_of": "2026-11-04", "weekly_km": [12, 16]}]},
+        reason="wednesday",
+    )
+    assert "week_of" in not_monday["error"]
+    assert "Monday" in not_monday["error"]
+    bad_band = server.update_season(
+        "2027",
+        {"week_overrides": [{"week_of": "2026-11-09", "weekly_km": 30}]},
+        reason="not a band",
+    )
+    assert "weekly_km" in bad_band["error"]
+
+    from season_plan import week_monday
+
+    monday = week_monday(date.today())
+    saved = server.update_season(
+        "2027",
+        {
+            "week_overrides": [
+                {
+                    "week_of": monday.isoformat(),
+                    "weekly_km": [12, 16],
+                    "reason": "deload",
+                    "hard_pct": 0,
+                }
+            ]
+        },
+        reason="cap this week",
+    )
+    assert saved["ok"] is True
+    status = server.get_plan_status()
+    assert status["this_week_target"] == [12, 16]
+    assert status["scaling"]["overridden"] is True
+    assert status["scaling"]["this_week_target_km"] == [12, 16]
+    assert status["week_overrides"][0]["week_of"] == monday.isoformat()
+    assert status["week_overrides"][0]["resolved_band"] == [12, 16]
+    assert status["week_overrides"][0]["overridden"] is True
+    stored = server.get_season()
+    assert stored["week_overrides"][0]["week_of"] == monday.isoformat()
+    assert stored["honoured_overrides"][0]["resolved_band"] == [12, 16]
+    assert stored["honoured_overrides"][0]["overridden"] is True
 
 
 def test_missing_week_band_and_longest_floor(plan_db) -> None:

@@ -726,6 +726,82 @@ def export_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return exported
 
 
+_OVERRIDE_FIELDS = {"week_of", "weekly_km", "reason", "hard_pct", "sessions"}
+
+
+def _validate_week_overrides(document: dict[str, Any]) -> None:
+    entries = document.get("week_overrides")
+    if entries is None:
+        return
+    if not isinstance(entries, list):
+        raise ValueError("week_overrides is invalid.")
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ValueError("week_overrides entry is invalid.")
+        for key in entry:
+            if key not in _OVERRIDE_FIELDS:
+                raise ValueError(f"{key} is invalid.")
+        week_of = entry.get("week_of")
+        if not isinstance(week_of, str):
+            raise ValueError("week_of must be a Monday ISO date.")
+        try:
+            day = date.fromisoformat(week_of[:10])
+        except ValueError as exc:
+            raise ValueError("week_of must be a Monday ISO date.") from exc
+        if day.weekday() != 0:
+            raise ValueError("week_of must be a Monday ISO date.")
+        band = entry.get("weekly_km")
+        if not isinstance(band, (list, tuple)) or len(band) != 2:
+            raise ValueError("weekly_km must be [low, high].")
+        try:
+            low = float(band[0])
+            high = float(band[1])
+        except (TypeError, ValueError) as exc:
+            raise ValueError("weekly_km must be [low, high].") from exc
+        if high < low:
+            raise ValueError("weekly_km must be [low, high].")
+        if "hard_pct" in entry and entry["hard_pct"] is not None:
+            try:
+                float(entry["hard_pct"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("hard_pct is invalid.") from exc
+        if "sessions" in entry and entry["sessions"] is not None:
+            if not isinstance(entry["sessions"], list):
+                raise ValueError("sessions is invalid.")
+
+
+def honoured_overrides(season: dict[str, Any]) -> list[dict[str, Any]]:
+    """Overrides ``band_for_week`` actually applies, with the resolved band."""
+    echoed: list[dict[str, Any]] = []
+    for entry in season.get("week_overrides") or []:
+        week_of = entry.get("week_of")
+        if not isinstance(week_of, str):
+            continue
+        try:
+            monday = date.fromisoformat(week_of[:10])
+        except ValueError:
+            continue
+        band = band_for_week(season, monday)
+        if not band.get("overridden"):
+            continue
+        row: dict[str, Any] = {
+            "week_of": monday.isoformat(),
+            "weekly_km": [
+                _num(entry["weekly_km"][0]),
+                _num(entry["weekly_km"][1]),
+            ],
+            "reason": entry.get("reason"),
+            "resolved_band": band.get("this_week_target_km"),
+            "overridden": True,
+        }
+        if entry.get("hard_pct") is not None:
+            row["hard_pct"] = entry.get("hard_pct")
+        if entry.get("sessions") is not None:
+            row["sessions"] = entry.get("sessions")
+        echoed.append(row)
+    return echoed
+
+
 def validate_season(document: dict[str, Any]) -> None:
     if not document.get("timezone"):
         raise ValueError("timezone is required.")
@@ -736,6 +812,7 @@ def validate_season(document: dict[str, Any]) -> None:
             raise ValueError(
                 f"Phase {phase.get('name')} sets deload_every_n_weeks without deload_factor."
             )
+    _validate_week_overrides(document)
 
 
 def example_season() -> dict[str, Any]:

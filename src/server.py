@@ -39,7 +39,7 @@ from plan_store import (
 )
 from scheduling import schedule_week as run_schedule_week
 from scheduling import sync_block as run_sync_block
-from season_plan import validate_season, zoned_today
+from season_plan import honoured_overrides, validate_season, zoned_today
 from sport import Sport, parse_sport
 from errors import (
     AUTH_FAILED,
@@ -2015,11 +2015,17 @@ def set_season(season: Dict[str, Any]) -> Dict[str, Any]:
 
 @mcp.tool()
 def get_season(season_id: Optional[str] = None) -> Dict[str, Any]:
-    """Return the stored season. Does not call Garmin."""
+    """Return the stored season. Does not call Garmin.
+
+    ``week_overrides`` is the stored list. ``honoured_overrides`` repeats the
+    entries the planner applies, each with that Monday's resolved band.
+    """
     document = load_season(season_id)
     if document is None:
         return {"error": "no_season"}
-    return document
+    payload = dict(document)
+    payload["honoured_overrides"] = honoured_overrides(document)
+    return payload
 
 
 @mcp.tool()
@@ -2031,6 +2037,9 @@ def update_season(
     """JSON merge patch. reason is required and is stored as a plan note.
 
     A note is not a prescription change. This patch is.
+
+    A ``week_overrides`` entry is ``week_of`` (Monday ISO date), ``weekly_km``
+    ``[low, high]``, and optional ``reason``, ``hard_pct``, and ``sessions``.
     """
     if not reason or not str(reason).strip():
         return {"error": "update_season requires reason"}
