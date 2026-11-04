@@ -17,6 +17,7 @@ from season_plan import (
     export_sessions,
     garmin_date_mismatch,
     goal_by_id,
+    goal_target_warnings,
     honoured_overrides,
     load_context_from_brief,
     resolve_sessions,
@@ -405,6 +406,13 @@ def build_coaching_overview(
         for event in list(events) + list(calendar.get("events") or [])
         if isinstance(event, dict)
     ]
+    known_messages = {item.get("message") for item in details}
+    for item in goal_target_warnings(season, seen_events, today=today):
+        if item["message"] in known_messages or item["message"] in warnings:
+            continue
+        warnings.append(item["message"])
+        details.append(item)
+        known_messages.add(item["message"])
     titles = {str(event.get("title") or "") for event in seen_events}
     expected = (active or {}).get("garmin_event_title") or (active or {}).get("title")
     race_on_calendar = bool(expected) and any(expected in title or title in str(expected) for title in titles)

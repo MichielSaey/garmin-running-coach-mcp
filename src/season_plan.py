@@ -128,6 +128,9 @@ def _public_goal(goal: dict[str, Any] | None, *, today: date | None = None) -> d
         payload["type"] = goal.get("type")
     if "min_longest_run_km" in goal:
         payload["min_longest_run_km"] = goal.get("min_longest_run_km")
+    for key in ("garmin_event_id", "garmin_event_title", "distance_meters", "duration_minutes"):
+        if key in goal:
+            payload[key] = goal.get(key)
     if today is not None and goal.get("date"):
         payload["days_to_goal"] = (_parse_date(goal["date"]) - today).days
     return payload
@@ -994,6 +997,29 @@ def validate_season(document: dict[str, Any]) -> None:
                 f"Phase {phase.get('name')} sets deload_every_n_weeks without deload_factor."
             )
     _validate_week_overrides(document)
+    _validate_goals(document)
+
+
+def _validate_goals(document: dict[str, Any]) -> None:
+    """Optional goal fields. Absent fields stay absent."""
+    for goal in document.get("goals") or []:
+        if not isinstance(goal, dict):
+            raise ValueError("goals entry is invalid.")
+        if goal.get("garmin_event_id") is not None:
+            try:
+                int(goal["garmin_event_id"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("garmin_event_id is invalid.") from exc
+        if goal.get("distance_meters") is not None:
+            try:
+                float(goal["distance_meters"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("distance_meters is invalid.") from exc
+        if goal.get("duration_minutes") is not None:
+            try:
+                float(goal["duration_minutes"])
+            except (TypeError, ValueError) as exc:
+                raise ValueError("duration_minutes is invalid.") from exc
 
 
 def example_season() -> dict[str, Any]:
@@ -1177,6 +1203,196 @@ def load_context_from_brief(brief: dict[str, Any] | None, *, hard_pct: Any) -> d
     return context
 
 
+def _event_target(event: dict[str, Any]) -> dict[str, Any]:
+    target = event.get("target")
+    if isinstance(target, dict) and target.get("value") is not None:
+        return target
+    raw = event.get("completionTarget")
+    if isinstance(raw, dict):
+        return raw
+    return {}
+
+
+def _meters_of(target: dict[str, Any]) -> float | None:
+    if target.get("unitType") != "distance" or target.get("value") is None:
+        return None
+    value = float(target["value"])
+    unit = str(target.get("unit") or "")
+    if unit in {"meter", "m"}:
+        return value
+    if unit in {"km", "kilometer"}:
+        return value * 1000.0
+    if unit == "mile":
+        return value * 1609.344
+    return None
+
+
+def _minutes_of(target: dict[str, Any]) -> float | None:
+    if target.get("unitType") != "duration" or target.get("value") is None:
+        return None
+    value = float(target["value"])
+    unit = str(target.get("unit") or "")
+    if unit == "hour":
+        return value * 60.0
+    if unit == "second":
+        return value / 60.0
+    if unit == "minute":
+        return value
+    return None
+
+
+def _format_meters(meters: float) -> str:
+    if abs(meters) >= 1000:
+        km = meters / 1000.0
+        text = f"{km:.2f}".rstrip("0").rstrip(".")
+        return f"{text} km"
+    return f"{meters:g} m"
+
+
+def _format_minutes(minutes: float) -> str:
+    if minutes >= 60 and abs(minutes % 60) < 0.05:
+        hours = minutes / 60.0
+        text = f"{hours:.2f}".rstrip("0").rstrip(".")
+        return f"{text} h"
+    return f"{minutes:g} min"
+
+
+def _format_target(target: dict[str, Any]) -> str:
+    meters = _meters_of(target)
+    if meters is not None:
+        return _format_meters(meters)
+    minutes = _minutes_of(target)
+    if minutes is not None:
+        return _format_minutes(minutes)
+    return f"{target.get('value')} {target.get('unit') or ''}".strip()
+
+
+def _upcoming_events(events: list[dict[str, Any]], today: date) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    seen: set[tuple[Any, str, str]] = set()
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        raw = str(event.get("date") or "")[:10]
+        try:
+            day = date.fromisoformat(raw)
+        except ValueError:
+            continue
+        if day <= today:
+            continue
+        key = (event.get("event_id"), raw, str(event.get("title") or ""))
+        if key in seen:
+            continue
+        seen.add(key)
+        rows.append(event)
+    return rows
+
+
+def _linked_event(goal: dict[str, Any], events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    event_id = goal.get("garmin_event_id")
+    if event_id is not None:
+        wanted = int(event_id)
+        for event in events:
+            if event.get("event_id") == wanted:
+                return event
+        return None
+    expected = str(goal.get("garmin_event_title") or goal.get("title") or "")
+    expected_norm = _normalize_title(expected)
+    if not expected_norm:
+        return None
+    for event in events:
+        title = str(event.get("title") or "")
+        folded = _normalize_title(title)
+        if folded == expected_norm or expected_norm in folded:
+            return event
+    return None
+
+
+def goal_target_warnings(
+    season: dict[str, Any],
+    events: list[dict[str, Any]] | None,
+    *,
+    today: date,
+) -> list[dict[str, Any]]:
+    """Goal/event target mismatches, and upcoming events that share a target."""
+    upcoming = _upcoming_events(list(events or []), today)
+    details: list[dict[str, Any]] = []
+    grouped: dict[tuple[Any, ...], list[dict[str, Any]]] = {}
+    for event in upcoming:
+        target = _event_target(event)
+        meters = _meters_of(target)
+        minutes = _minutes_of(target)
+        if meters is not None:
+            key = ("distance", round(meters, 1))
+        elif minutes is not None:
+            key = ("duration", round(minutes, 1))
+        elif target.get("value") is not None:
+            key = (target.get("unitType"), target.get("unit"), target.get("value"))
+        else:
+            continue
+        grouped.setdefault(key, []).append(event)
+    for rows in grouped.values():
+        if len(rows) < 2:
+            continue
+        names = " and ".join(str(row.get("title") or "event") for row in rows)
+        shown = _format_target(_event_target(rows[0]))
+        details.append(
+            warning_detail(
+                "shared_event_target",
+                f"{names} share the completion target {shown}.",
+                value=shown,
+                limit=shown,
+                basis="completion target on upcoming calendar events",
+                hint="Give each event its own distance or duration.",
+            )
+        )
+    for goal in _goals(season):
+        event = _linked_event(goal, upcoming)
+        if event is None:
+            continue
+        target = _event_target(event)
+        title = str(event.get("title") or goal.get("title") or "event")
+        if goal.get("distance_meters") is not None and _meters_of(target) is not None:
+            goal_meters = float(goal["distance_meters"])
+            event_meters = float(_meters_of(target))
+            if abs(event_meters - goal_meters) > 1:
+                event_text = _format_meters(event_meters)
+                goal_text = _format_meters(goal_meters)
+                details.append(
+                    warning_detail(
+                        "goal_target_mismatch",
+                        (
+                            f"{title} target is {event_text}. "
+                            f"The season goal distance is {goal_text}."
+                        ),
+                        value=event_text,
+                        limit=goal_text,
+                        basis="linked Garmin event distance against the season goal",
+                        hint="Update the event target or the goal distance so they match.",
+                    )
+                )
+        if goal.get("duration_minutes") is not None and _minutes_of(target) is not None:
+            goal_minutes = float(goal["duration_minutes"])
+            event_minutes = float(_minutes_of(target))
+            if abs(event_minutes - goal_minutes) > 0.5:
+                event_text = _format_minutes(event_minutes)
+                goal_text = _format_minutes(goal_minutes)
+                details.append(
+                    warning_detail(
+                        "goal_target_mismatch",
+                        (
+                            f"{title} target is {event_text}. "
+                            f"The season goal duration is {goal_text}."
+                        ),
+                        value=event_text,
+                        limit=goal_text,
+                        basis="linked Garmin event duration against the season goal",
+                        hint="Update the event target or the goal duration so they match.",
+                    )
+                )
+    return details
+
+
 def status_warning_details(
     season: dict[str, Any],
     today: date,
@@ -1259,6 +1475,7 @@ def status_warning_details(
                 hint="Move the goal date or the window.",
             )
         )
+    details.extend(goal_target_warnings(season, event_rows or [], today=today))
     return details
 
 

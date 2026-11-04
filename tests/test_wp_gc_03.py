@@ -1733,6 +1733,69 @@ def test_update_event_duration_is_visible_on_the_following_read() -> None:
     assert "did not stick" in missed["error"]
 
 
+def test_goal_event_target_mismatch_reports_both_values(plan_db) -> None:
+    del plan_db
+    from season_plan import goal_target_warnings
+
+    season = example_season()
+    season["goals"][0]["garmin_event_id"] = 7
+    season["goals"][0]["distance_meters"] = 80470
+    events = [
+        {
+            "event_id": 7,
+            "title": "Sibérien",
+            "date": "2027-04-24",
+            "target": {"value": 53.0, "unit": "km", "unitType": "distance"},
+        },
+        {
+            "event_id": 8,
+            "title": "Lee Trail",
+            "date": "2027-06-26",
+            "target": {"value": 53.0, "unit": "km", "unitType": "distance"},
+        },
+        {
+            "event_id": 9,
+            "title": "Pacte Sibérien",
+            "date": "2027-04-23",
+            "target": {"value": 100, "unit": "km", "unitType": "distance"},
+        },
+    ]
+    details = goal_target_warnings(season, events, today=date(2026, 11, 4))
+    mismatch = next(item for item in details if item["code"] == "goal_target_mismatch")
+    assert "53 km" in mismatch["message"]
+    assert "80.47 km" in mismatch["message"]
+    assert mismatch["value"] != mismatch["limit"]
+    assert "Sibérien" in mismatch["message"]
+    shared = next(item for item in details if item["code"] == "shared_event_target")
+    assert "Lee Trail" in shared["message"]
+    assert "53 km" in shared["message"]
+    # The id is preferred, so the title-matched 100 km event is not the comparison.
+    assert "100 km" not in mismatch["message"]
+
+    server.set_season(season)
+    now = datetime(2026, 11, 4, 8, 0, tzinfo=ZoneInfo("Europe/Brussels"))
+    payload = build_coaching_overview(
+        object(),
+        lambda *_args, **_kwargs: {"calendarItems": []},
+        season=season,
+        brief={},
+        now=now,
+        snapshot={
+            "as_of": "2026-11-04T08:00:00+01:00",
+            "runs_present": False,
+            "events": events,
+        },
+        notes=[],
+    )
+    assert any("53 km" in item and "80.47 km" in item for item in payload["warnings"])
+    rejected = server.update_season(
+        "2027",
+        {"goals": [{**season["goals"][0], "distance_meters": "far"}]},
+        reason="bad distance",
+    )
+    assert "distance_meters" in rejected["error"]
+
+
 def test_accent_folded_garmin_title_still_flags_the_date_mismatch() -> None:
     from season_plan import garmin_date_mismatch
 
