@@ -1256,6 +1256,13 @@ def get_personal_records() -> Dict[str, Any]:
     return _normalize_personal_records(raw)
 
 
+def _estimated_duration_minutes(seconds: int | float | None) -> Optional[float]:
+    """Tool-facing minutes. Zero seconds means the pace was unknown."""
+    if seconds is None or seconds <= 0:
+        return None
+    return round(float(seconds) / 60, 1)
+
+
 def _upload_running_workout(client: Garmin, workout) -> Dict[str, Any]:
     from garminconnect.workout import CyclingWorkout
 
@@ -1270,7 +1277,9 @@ def _upload_running_workout(client: Garmin, workout) -> Dict[str, Any]:
     return {
         "workoutId": workout_id,
         "workoutName": workout.workoutName,
-        "estimatedDurationMinutes": round(workout.estimatedDurationInSecs / 60, 1),
+        "estimatedDurationMinutes": _estimated_duration_minutes(
+            workout.estimatedDurationInSecs
+        ),
         "upload": result,
     }
 
@@ -1380,7 +1389,9 @@ def _create_running_workout(
         "resolved_steps": canonical,
         "heartRateZones": resolve_hr_context(client, get_profile()).get("zones"),
         "sport": chosen.value,
-        "estimatedDurationMinutes": round(running_workout.estimatedDurationInSecs / 60, 1),
+        "estimatedDurationMinutes": _estimated_duration_minutes(
+            running_workout.estimatedDurationInSecs
+        ),
     }
     if workout_date is not None and workout_id is not None:
         scheduled = _schedule_existing(client, int(workout_id), workout_date)
@@ -1474,7 +1485,6 @@ def _schedule_existing(client: Garmin, workout_id: int, workout_date: str) -> Di
     }
 
 
-@mcp.tool()
 def _schedule_id_from_schedule_result(scheduled: Any) -> Optional[int]:
     if not isinstance(scheduled, dict):
         return None
@@ -1503,6 +1513,7 @@ def _name_from_schedule_item(item: Any) -> Optional[str]:
     return None
 
 
+@mcp.tool()
 def schedule_workout(workout_id: int, workout_date: str) -> Dict[str, Any]:
     """Schedule an existing workout template on a calendar date (YYYY-MM-DD).
 
@@ -1840,8 +1851,8 @@ def combine_workout_templates(
 
     upload_result["sport"] = chosen.value
     upload_result["resolved_steps"] = canonical
-    upload_result["estimatedDurationMinutes"] = round(
-        running_workout.estimatedDurationInSecs / 60, 1
+    upload_result["estimatedDurationMinutes"] = _estimated_duration_minutes(
+        running_workout.estimatedDurationInSecs
     )
     upload_result["segments"] = checked
     upload_result["heartRateZones"] = resolve_hr_context(client, get_profile()).get("zones")
@@ -1903,7 +1914,6 @@ def list_scheduled_workouts(start: str, end: str) -> Any:
     return scheduled_workouts_between(client, _call_optional, start_day, end_day)
 
 
-@mcp.tool()
 def _scheduled_row_echo(
     item: Optional[Dict[str, Any]],
     *,
@@ -1928,6 +1938,7 @@ def _scheduled_row_echo(
     }
 
 
+@mcp.tool()
 def delete_scheduled_workout(
     schedule_id: Optional[int] = None,
     workout_id: Optional[int] = None,

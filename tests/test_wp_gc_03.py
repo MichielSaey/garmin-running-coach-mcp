@@ -207,6 +207,8 @@ def test_distance_hr_range_builds_and_echoes_the_bounds(plan_db) -> None:
     assert built.endConditionValue == 17000
     assert built.targetValueOne == 135
     assert built.targetValueTwo == 150
+    assert result.get("estimatedDurationMinutes") != 1.0
+    assert result.get("estimatedDurationMinutes") is None
     zoned = normalize_steps(
         [
             {
@@ -217,6 +219,56 @@ def test_distance_hr_range_builds_and_echoes_the_bounds(plan_db) -> None:
         ]
     )
     assert zoned[0]["target"]["type"] == "hr_zone"
+
+
+def test_distance_hr_range_with_pace_reports_meters_over_pace(plan_db) -> None:
+    del plan_db
+    pace = 5.0
+    steps = [
+        {
+            "type": "interval",
+            "end": {"type": "distance", "meters": 17_000},
+            "target": {"type": "hr_range", "min_bpm": 135, "max_bpm": 150},
+            "estimated_pace_mps": pace,
+        }
+    ]
+    mock_client = MagicMock()
+    mock_client.upload_cycling_workout.return_value = {"workoutId": 78}
+    with (
+        patch.object(server, "_get_client_or_error", return_value=(mock_client, None)),
+        patch.object(server, "get_profile", return_value={}),
+        patch.object(server, "resolve_hr_context", return_value={"zones": []}),
+    ):
+        result = server.create_workout("Gravel spin", steps, sport="gravel")
+    assert result.get("error") is None
+    expected = 17_000 / pace / 60
+    assert result["estimatedDurationMinutes"] == pytest.approx(expected, abs=0.2)
+    assert result["estimatedDurationMinutes"] != 1.0
+
+
+def test_short_timed_workout_still_builds(plan_db) -> None:
+    del plan_db
+    mock_client = MagicMock()
+    mock_client.upload_running_workout.return_value = {"workoutId": 79}
+    with (
+        patch.object(server, "_get_client_or_error", return_value=(mock_client, None)),
+        patch.object(server, "get_profile", return_value={}),
+        patch.object(server, "resolve_hr_context", return_value={"zones": []}),
+    ):
+        result = server.create_workout(
+            "Stride",
+            [
+                {
+                    "type": "interval",
+                    "end": {"type": "time", "minutes": 0.5},
+                    "target": {"type": "hr_zone", "zone": 5},
+                }
+            ],
+        )
+    assert result.get("error") is None
+    workout = mock_client.upload_running_workout.call_args.args[0]
+    assert workout.estimatedDurationInSecs == 60
+    assert result["estimatedDurationMinutes"] == 1.0
 
 
 def test_create_workout_echoes_resolved_steps(plan_db) -> None:

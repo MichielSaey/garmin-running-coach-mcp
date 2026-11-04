@@ -4,6 +4,7 @@ from workout_builder import (
     build_running_workout,
     build_workout_steps,
     estimate_duration_seconds,
+    estimate_steps_duration_seconds,
     extract_workout_id,
 )
 
@@ -115,6 +116,45 @@ def test_estimate_duration_seconds_counts_repeat_iterations() -> None:
 
     # 2 iterations * (60s + 30s)
     assert estimate_duration_seconds(steps) == 180
+
+
+def test_hr_distance_without_pace_stays_unknown() -> None:
+    steps = [
+        {
+            "type": "interval",
+            "distance_meters": 17000,
+            "target": {"type": "hr_range", "min_bpm": 135, "max_bpm": 150},
+        }
+    ]
+    assert estimate_steps_duration_seconds(steps) == 0
+    workout = build_running_workout("Gravel spin", steps, sport="gravel")
+    assert workout.estimatedDurationInSecs == 0
+    built = build_workout_steps(steps)
+    # Heart-rate bounds are bpm, not a speed.
+    assert estimate_duration_seconds(built) != int(17000 / ((135 + 150) / 2))
+
+
+def test_hr_distance_with_pace_uses_meters_over_pace() -> None:
+    pace = 5.0
+    steps = [
+        {
+            "type": "interval",
+            "distance_meters": 17000,
+            "target": {"type": "hr_range", "min_bpm": 135, "max_bpm": 150},
+            "estimated_pace_mps": pace,
+        }
+    ]
+    assert estimate_steps_duration_seconds(steps) == int(17000 / pace)
+
+
+def test_short_timed_step_still_floors_to_one_minute() -> None:
+    workout = build_running_workout(
+        "Stride",
+        [{"type": "interval", "duration_minutes": 0.5, "heart_rate_zone": 5}],
+    )
+    assert workout.workoutName == "Stride"
+    assert workout.estimatedDurationInSecs == 60
+    assert len(workout.workoutSegments[0].workoutSteps) == 1
 
 
 def test_extract_workout_id_handles_common_response_shapes() -> None:

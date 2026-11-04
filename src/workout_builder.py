@@ -332,6 +332,10 @@ def estimate_steps_duration_seconds(steps: List[Dict[str, Any]]) -> int:
                 total += _step_estimated_seconds(nested) * iterations
             continue
         total += _step_estimated_seconds(step)
+    # A distance step with no pace contributes 0. That unknown must stay 0.
+    # A positive estimate under a minute still floors to 60 seconds.
+    if total <= 0:
+        return 0
     return max(int(total), 60)
 
 
