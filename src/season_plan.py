@@ -149,18 +149,6 @@ def apply_two_week_step(
     return [_num(low), shown]
 
 
-_OVERRIDE_WEEK_KEYS = ("week_of", "week_start")
-
-
-def _override_week_of(entry: dict[str, Any]) -> str | None:
-    """Override week key. ``week_of`` is canonical; ``week_start`` is accepted."""
-    for key in _OVERRIDE_WEEK_KEYS:
-        value = entry.get(key)
-        if isinstance(value, str):
-            return value
-    return None
-
-
 def band_for_week(season: dict[str, Any], week_monday_date: date) -> dict[str, Any]:
     """Kilometre band for the Monday that starts ``week_monday_date``'s week."""
     monday = week_monday(week_monday_date)
@@ -175,7 +163,7 @@ def band_for_week(season: dict[str, Any], week_monday_date: date) -> dict[str, A
         phase = current_phase(season, monday)
     override = None
     for entry in season.get("week_overrides") or []:
-        if _override_week_of(entry) == monday.isoformat():
+        if entry.get("week_of") == monday.isoformat():
             override = entry
             break
 
@@ -883,7 +871,7 @@ def week_plan(season: dict[str, Any], week_start: str) -> dict[str, Any]:
     phase = band.get("phase")
     override = None
     for entry in season.get("week_overrides") or []:
-        if _override_week_of(entry) == monday.isoformat():
+        if entry.get("week_of") == monday.isoformat():
             override = entry
             break
     return {
@@ -922,7 +910,7 @@ def export_sessions(sessions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return exported
 
 
-_OVERRIDE_FIELDS = {"week_of", "week_start", "weekly_km", "reason", "hard_pct", "sessions"}
+_OVERRIDE_FIELDS = {"week_of", "weekly_km", "reason", "hard_pct", "sessions"}
 
 
 def _validate_week_overrides(document: dict[str, Any]) -> None:
@@ -937,7 +925,7 @@ def _validate_week_overrides(document: dict[str, Any]) -> None:
         for key in entry:
             if key not in _OVERRIDE_FIELDS:
                 raise ValueError(f"{key} is invalid.")
-        week_of = _override_week_of(entry)
+        week_of = entry.get("week_of")
         if not isinstance(week_of, str):
             raise ValueError("week_of must be a Monday ISO date.")
         try:
@@ -970,7 +958,7 @@ def honoured_overrides(season: dict[str, Any]) -> list[dict[str, Any]]:
     """Overrides ``band_for_week`` actually applies, with the resolved band."""
     echoed: list[dict[str, Any]] = []
     for entry in season.get("week_overrides") or []:
-        week_of = _override_week_of(entry)
+        week_of = entry.get("week_of")
         if not isinstance(week_of, str):
             continue
         try:

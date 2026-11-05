@@ -93,6 +93,21 @@ def save_season(document: dict[str, Any]) -> dict[str, Any]:
     return document
 
 
+def _migrate_week_overrides(document: dict[str, Any]) -> bool:
+    """Rename legacy ``week_start`` override keys to the canonical ``week_of`` once."""
+    entries = document.get("week_overrides")
+    if not isinstance(entries, list):
+        return False
+    changed = False
+    for entry in entries:
+        if not isinstance(entry, dict) or "week_start" not in entry:
+            continue
+        entry.setdefault("week_of", entry["week_start"])
+        del entry["week_start"]
+        changed = True
+    return changed
+
+
 def load_season(season_id: Optional[str] = None) -> Optional[dict[str, Any]]:
     with connect() as conn:
         if season_id:
@@ -104,9 +119,15 @@ def load_season(season_id: Optional[str] = None) -> Optional[dict[str, Any]]:
             row = conn.execute(
                 "SELECT document FROM seasons ORDER BY updated_at DESC LIMIT 1"
             ).fetchone()
-    if row is None:
-        return None
-    return json.loads(row["document"])
+        if row is None:
+            return None
+        document = json.loads(row["document"])
+        if _migrate_week_overrides(document):
+            conn.execute(
+                "UPDATE seasons SET document = ? WHERE season_id = ?",
+                (json.dumps(document), str(document.get("season_id") or season_id or "")),
+            )
+        return document
 
 
 def add_note(

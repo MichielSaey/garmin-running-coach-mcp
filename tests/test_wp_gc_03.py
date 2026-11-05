@@ -347,30 +347,16 @@ def test_week_override_wins_and_a_note_does_not(plan_db) -> None:
     assert server.get_plan_status()["scaling"]["overridden"] is False
 
 
-def test_week_start_and_week_of_both_bind_this_week_target(plan_db) -> None:
+def test_week_start_is_rejected_and_week_of_changes_this_week_target(plan_db) -> None:
     del plan_db
     server.set_season(example_season())
-    aliased = server.update_season(
+    rejected = server.update_season(
         "2027",
         {"week_overrides": [{"week_start": "2026-11-09", "weekly_km": [25, 30]}]},
-        reason="guessed the key, now accepted",
+        reason="guessed the key",
     )
-    assert aliased["ok"] is True
-    stored = server.get_season()
-    assert stored["honoured_overrides"][0]["week_of"] == "2026-11-09"
-    assert stored["honoured_overrides"][0]["resolved_band"] == [25, 30]
-    assert stored["honoured_overrides"][0]["overridden"] is True
-    plan = server.get_week_plan("2026-11-09")
-    assert plan["overridden"] is True
-    assert plan["band"] == [25, 30]
-
-    unknown = server.update_season(
-        "2027",
-        {"week_overrides": [{"week": "2026-11-16", "weekly_km": [29, 33]}]},
-        reason="not a key",
-    )
-    assert "week" in unknown["error"]
-    assert "invalid" in unknown["error"]
+    assert "week_start" in rejected["error"]
+    assert "invalid" in rejected["error"]
     not_monday = server.update_season(
         "2027",
         {"week_overrides": [{"week_of": "2026-11-04", "weekly_km": [12, 16]}]},
@@ -414,6 +400,32 @@ def test_week_start_and_week_of_both_bind_this_week_target(plan_db) -> None:
     assert stored["week_overrides"][0]["week_of"] == monday.isoformat()
     assert stored["honoured_overrides"][0]["resolved_band"] == [12, 16]
     assert stored["honoured_overrides"][0]["overridden"] is True
+
+
+def test_legacy_week_start_overrides_migrate_to_week_of(plan_db) -> None:
+    del plan_db
+    from plan_store import load_season, save_season
+    from season_plan import band_for_week
+
+    legacy = example_season()
+    legacy["week_overrides"] = [
+        {"week_start": "2026-11-09", "weekly_km": [25, 30], "reason": "legacy"}
+    ]
+    save_season(legacy)
+
+    loaded = load_season()
+    assert loaded["week_overrides"][0]["week_of"] == "2026-11-09"
+    assert loaded["week_overrides"][0]["reason"] == "legacy"
+    assert "week_start" not in loaded["week_overrides"][0]
+
+    persisted = load_season()
+    assert "week_start" not in persisted["week_overrides"][0]
+    assert persisted["week_overrides"][0]["week_of"] == "2026-11-09"
+
+    band = band_for_week(persisted, date(2026, 11, 9))
+    assert band["overridden"] is True
+    assert band["this_week_target_km"] == [25, 30]
+    assert server.get_week_plan("2026-11-09")["overridden"] is True
 
 
 def test_get_week_plan_applies_the_base_override(plan_db) -> None:
