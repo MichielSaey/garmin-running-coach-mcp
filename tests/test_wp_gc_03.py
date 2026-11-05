@@ -347,16 +347,30 @@ def test_week_override_wins_and_a_note_does_not(plan_db) -> None:
     assert server.get_plan_status()["scaling"]["overridden"] is False
 
 
-def test_week_start_is_rejected_and_week_of_changes_this_week_target(plan_db) -> None:
+def test_week_start_and_week_of_both_bind_this_week_target(plan_db) -> None:
     del plan_db
     server.set_season(example_season())
-    rejected = server.update_season(
+    aliased = server.update_season(
         "2027",
         {"week_overrides": [{"week_start": "2026-11-09", "weekly_km": [25, 30]}]},
-        reason="guessed the key",
+        reason="guessed the key, now accepted",
     )
-    assert "week_start" in rejected["error"]
-    assert "invalid" in rejected["error"]
+    assert aliased["ok"] is True
+    stored = server.get_season()
+    assert stored["honoured_overrides"][0]["week_of"] == "2026-11-09"
+    assert stored["honoured_overrides"][0]["resolved_band"] == [25, 30]
+    assert stored["honoured_overrides"][0]["overridden"] is True
+    plan = server.get_week_plan("2026-11-09")
+    assert plan["overridden"] is True
+    assert plan["band"] == [25, 30]
+
+    unknown = server.update_season(
+        "2027",
+        {"week_overrides": [{"week": "2026-11-16", "weekly_km": [29, 33]}]},
+        reason="not a key",
+    )
+    assert "week" in unknown["error"]
+    assert "invalid" in unknown["error"]
     not_monday = server.update_season(
         "2027",
         {"week_overrides": [{"week_of": "2026-11-04", "weekly_km": [12, 16]}]},

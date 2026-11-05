@@ -2122,6 +2122,7 @@ def update_season(
 
     A ``week_overrides`` entry is ``week_of`` (Monday ISO date), ``weekly_km``
     ``[low, high]``, and optional ``reason``, ``hard_pct``, and ``sessions``.
+    ``week_start`` is accepted as an alias for ``week_of``.
     A goal may set optional ``garmin_event_id`` (preferred over the title),
     ``distance_meters``, and ``duration_minutes``.
     """
